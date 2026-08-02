@@ -1,6 +1,8 @@
-# opencode-agent-tree
+# @beremaran/opencode-agent-tree
 
 An [opencode](https://opencode.ai) plugin that turns the model into an **orchestrator**: every request is decomposed into subtasks and **delegated to subagents via the `task` tool**, never done by the orchestrator itself. You decide which model powers the subagents and which powers the orchestrator.
+
+> **Renamed:** this package was previously published as `opencode-agent-tree`. It is now `@beremaran/opencode-agent-tree`; the old name is deprecated on npm.
 
 - Zero-config setup: one plugin entry, one required option.
 - Works with built-in subagents (`general`, `explore`) and any user-defined agents.
@@ -20,7 +22,7 @@ If a model ever ignores the directive, layer 2 still makes it delegate: the tool
 This is the exact prompt injected into the orchestrator agent's system prompt (as configured in `src/index.ts`, `orchestratorDirective`):
 
 ```markdown
-# Orchestrator Mode (enforced by opencode-agent-tree)
+# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
 
 You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, delegate, and review.
 
@@ -73,7 +75,7 @@ From npm:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-agent-tree", { "subagentModel": "anthropic/claude-sonnet-4-6" }]
+  "plugin": ["@beremaran/opencode-agent-tree", { "subagentModel": "anthropic/claude-sonnet-4-6" }]
 }
 ```
 
@@ -98,7 +100,7 @@ From npm:
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
     [
-      "opencode-agent-tree",
+      "@beremaran/opencode-agent-tree",
       {
         "subagentModel": "anthropic/claude-sonnet-4-6",
         "orchestratorModel": "anthropic/claude-opus-4-5",

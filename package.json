@@ -1,6 +1,10 @@
 {
-  "name": "opencode-agent-tree",
+  "name": "@beremaran/opencode-agent-tree",
   "version": "0.1.0",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "description": "Force opencode to act as an orchestrator: every task is decomposed and delegated to subagents, with user-configurable models per agent.",
   "type": "module",
   "main": "src/index.ts",

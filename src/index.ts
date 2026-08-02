@@ -73,7 +73,7 @@ const isSubagentLike = (agent: AgentLike | undefined) =>
 const orchestratorDirective = (opts: Required<OrchestratorOptions>) => {
   const blocked = opts.blockedTools.length > 0 ? opts.blockedTools.join(", ") : "none"
   const extra = opts.instructions ? `\n\n${opts.instructions}` : ""
-  return `# Orchestrator Mode (enforced by opencode-agent-tree)
+  return `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
 
 You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, delegate, and review.
 
@@ -103,8 +103,8 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
 
   if (!opts.subagentModel) {
     const message =
-      '[opencode-agent-tree] The `subagentModel` option is required, e.g. ["opencode-agent-tree", { "subagentModel": "anthropic/claude-sonnet-4-6" }]'
-    await client.app.log({ body: { service: "opencode-agent-tree", level: "error", message } })
+      '[@beremaran/opencode-agent-tree] The `subagentModel` option is required, e.g. ["@beremaran/opencode-agent-tree", { "subagentModel": "anthropic/claude-sonnet-4-6" }]'
+    await client.app.log({ body: { service: "@beremaran/opencode-agent-tree", level: "error", message } })
     throw new Error(message)
   }
 
@@ -145,7 +145,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
 
       await client.app.log({
         body: {
-          service: "opencode-agent-tree",
+          service: "@beremaran/opencode-agent-tree",
           level: "info",
           message: `Orchestrator "${opts.orchestratorAgent}" enabled; subagents -> ${opts.subagentModel}`,
           extra: {

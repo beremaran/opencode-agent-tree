@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for contributing to opencode-agent-tree!
+Thanks for contributing to @beremaran/opencode-agent-tree!
 
 ## Getting started
 
