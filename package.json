@@ -23,6 +23,10 @@
     "swarm"
   ],
   "author": "opencode-agent-tree contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/beremaran/opencode-agent-tree.git"
+  },
   "license": "MIT",
   "peerDependencies": {
     "@opencode-ai/plugin": "*"
