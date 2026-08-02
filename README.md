@@ -4,21 +4,23 @@ An [opencode](https://opencode.ai) plugin that turns the model into an **orchest
 
 > **Renamed:** this package was previously published as `opencode-agent-tree`. It is now `@beremaran/opencode-agent-tree`; the old name is deprecated on npm.
 
-- Dedicated `orchestrator` primary agent; the built-in `build` agent stays untouched.
+- Dedicated `orchestrator` primary agent and `worker` subagent; the built-in `build` and `plan` agents stay untouched.
 - Change the delegated model from chat with `/subagent-model provider/model`.
 - Set a default effort/variant and per-agent overrides for delegated models.
 - Simple setup: one plugin entry, one required option.
-- Works with built-in subagents (`general`, `explore`) and any user-defined agents.
+- Works with the dedicated `worker`, built-in subagents (`general`, `explore`), and any user-defined agents.
 - Enforcement is layered: prompt directive + hard tool block.
 
 ## How it forces orchestration
 
 Two independent enforcement layers:
 
-1. **System prompt directive** — a strict orchestrator prompt is installed on a dedicated `orchestrator` primary agent (appended to any existing prompt it may have). Subagent prompts and the built-in `build` agent are untouched.
+1. **System prompt directive** — a strict orchestrator prompt is installed on a dedicated `orchestrator` primary agent (appended to any existing prompt it may have). Subagent prompts and the built-in `build` and `plan` agents are untouched, except for the plugin-created `worker` prompt.
 2. **Hard tool block** — the orchestrator agent's `permission` config is set to `deny` for hands-on tools (`edit`, `write`, `apply_patch`, and `bash` by default). The model physically cannot do the work itself.
 
 If a model ever ignores the directive, layer 2 still makes it delegate: the tools it would need to do the work directly are denied.
+
+The plugin creates a dedicated `worker` subagent when one is not already defined. It receives `subagentModel` by default and is the preferred target for hands-on implementation, testing, and verification. The existing `general` and `explore` routing remains available for compatibility.
 
 ## The orchestrator directive
 
@@ -46,16 +48,17 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 - Hands-on tools are hard-blocked for you (blockedTools joined, "edit, write, apply_patch, bash" by default). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
 
 ## Default delegation
+- `worker` — hands-on implementation, refactoring, testing, and verification.
 - `explore` — codebase research, locating code, understanding existing implementations.
-- `general` — implementation, refactoring, testing, and any task without a more specific subagent.
-- Prefer the most specialized subagent for each subtask; fall back to `general`.
+- `general` — complex research or any task without a more specific subagent.
+- Prefer `worker` for hands-on work and the most specialized subagent for each other subtask; fall back to `general`.
 ```
 
 Two placeholders are substituted at runtime:
 
 | Placeholder | Value |
 | ----------- | ----- |
-| `blockedTools` list | The `blockedTools` option joined with `, ` (default: `edit, bash`) |
+| `blockedTools` list | The `blockedTools` option joined with `, ` (default: `edit, write, apply_patch, bash`) |
 | `instructions` | The `instructions` option, appended verbatim at the end |
 
 ## Installation
@@ -140,9 +143,9 @@ The change applies immediately to subsequent delegations in the running opencode
 ## Notes
 
 - The orchestrator explicitly keeps `task`, `todowrite`, and `question` access so it can delegate, maintain a visible task list, and clarify blockers.
-- Subagents keep their default tools; only the dedicated orchestrator's hands-on tools are restricted. The built-in `build` and `plan` agents remain available unchanged.
+- Subagents keep their default tools; only the dedicated orchestrator's hands-on tools are restricted. The dedicated `worker` is the preferred implementation target, while the built-in `build` and `plan` agents remain available unchanged.
 - The directive is installed on the orchestrator agent only — subagents never receive it.
-- Built-in subagents (`general`, `explore`) and every user-defined subagent/all-mode agent are routed to `subagentModel`; agents with an explicit `model` in `opencode.json` are respected.
+- The dedicated `worker`, built-in subagents (`general`, `explore`), and every user-defined subagent/all-mode agent are routed to `subagentModel`; agents with an explicit `model` in `opencode.json` are respected.
 - `subagentEffort` and `agentEfforts` map to OpenCode's agent `variant` field. Values such as `low`, `medium`, and `high` are model/provider-specific; the plugin only validates that they are non-empty strings.
 - An agent's explicit `variant` in `opencode.json` takes precedence over plugin effort settings.
 

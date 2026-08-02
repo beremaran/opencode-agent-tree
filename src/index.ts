@@ -2,10 +2,12 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 const PLUGIN_ID = "@beremaran/opencode-agent-tree"
 const DIRECTIVE_MARKER = "# Orchestrator Mode"
+const WORKER_DIRECTIVE_MARKER = "# Worker Mode"
 const MODEL_COMMAND = "subagent-model"
 const MODEL_COMMAND_TEMPLATE =
   "The delegated subagent model is now `$ARGUMENTS` for this running opencode process. Confirm the active model in one sentence and do nothing else."
 const ORCHESTRATOR_TOOLS = ["task", "todowrite", "question"] as const
+const WORKER_AGENT = "worker"
 
 export interface OrchestratorOptions {
   /**
@@ -36,8 +38,9 @@ export interface OrchestratorOptions {
 
   /**
    * Restrict which agents get routed to `subagentModel`. Defaults to every
-   * built-in subagent (general, explore) plus all subagent/all-mode agents
-   * already declared by the user. The orchestrator agent is never routed.
+   * built-in subagent (general, explore), the dedicated `worker` agent, plus
+   * all subagent/all-mode agents already declared by the user. The
+   * orchestrator agent is never routed.
    */
   agents?: string[]
 
@@ -107,10 +110,21 @@ const DEFAULTS = {
 
 /**
  * Built-in agents are not present in the merged config when the plugin
- * `config` hook runs, so the target entries must be created explicitly.
+ * `config` hook runs, so the target entries must be created explicitly. The
+ * dedicated worker is also created here when it is not user-defined.
  * Entries created here are merged over the built-ins at agent lookup time.
  */
 const BUILTIN_SUBAGENTS = ["general", "explore"]
+
+const workerDirective = `# Worker Mode (enforced by ${PLUGIN_ID})
+
+You are a WORKER. Execute the complete task assigned by the orchestrator directly.
+
+## Worker rules
+1. Inspect the relevant code and context before acting.
+2. Implement, test, and verify the assigned task with the tools available to you.
+3. Do not delegate the task further unless the orchestrator explicitly asks you to.
+4. Report what you changed, what you verified, and any remaining blocker concisely.`
 
 const isSubagentLike = (agent: AgentLike | undefined) =>
   !agent || agent.mode === undefined || agent.mode === "subagent" || agent.mode === "all"
@@ -229,9 +243,10 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 - Hands-on tools are hard-blocked for you (${blocked}). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
 
 ## Default delegation
+- \`worker\` — hands-on implementation, refactoring, testing, and verification.
 - \`explore\` — codebase research, locating code, understanding existing implementations.
-- \`general\` — implementation, refactoring, testing, and any task without a more specific subagent.
-- Prefer the most specialized subagent for each subtask; fall back to \`general\`.${extra}`
+- \`general\` — complex research or any task without a more specific subagent.
+- Prefer \`worker\` for hands-on work and the most specialized subagent for each other subtask; fall back to \`general\`.${extra}`
 }
 
 export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
@@ -273,7 +288,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
         throw new Error(`[${PLUGIN_ID}] The orchestrator agent \`${opts.orchestratorAgent}\` is disabled.`)
       }
 
-      const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, ...Object.keys(agent)]
+      const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, WORKER_AGENT, ...Object.keys(agent)]
       const targets = [...new Set(candidates)].filter((name) => inScope(name, getAgent(name)))
       const targetSet = new Set(targets)
 
@@ -290,6 +305,13 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
       // Route every delegation target to the user-chosen model.
       for (const name of targets) {
         const def = ensureAgent(name)
+        if (name === WORKER_AGENT) {
+          def.mode ??= "subagent"
+          def.description ??= "Executes implementation, testing, and verification work delegated by the orchestrator."
+          if (!def.prompt?.includes(WORKER_DIRECTIVE_MARKER)) {
+            def.prompt = def.prompt ? `${def.prompt}\n\n${workerDirective}` : workerDirective
+          }
+        }
         const override = opts.agentModels[name]
         const wasRouted = routedModels.has(name)
         if (!def.model || wasRouted) {

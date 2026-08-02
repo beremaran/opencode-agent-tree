@@ -32,6 +32,7 @@ test("routes only eligible agents and preserves explicit models", async () => {
       model: "orchestrator/model",
       agent: {
         build: { mode: "primary", model: "existing/model", permission: { edit: "allow" } },
+        plan: { mode: "primary", model: "plan/model", prompt: "Plan only." },
         worker: { mode: "subagent" },
         existing: { mode: "all", model: "explicit/model", variant: "custom" },
         primary: { mode: "primary" },
@@ -56,6 +57,9 @@ test("routes only eligible agents and preserves explicit models", async () => {
     model: "existing/model",
     permission: { edit: "allow" },
   })
+  assert.deepEqual(config.agent.plan, { mode: "primary", model: "plan/model", prompt: "Plan only." })
+  assert.equal(config.agent.worker.mode, "subagent")
+  assert.match(config.agent.worker.prompt, /# Worker Mode/)
   assert.equal(config.default_agent, "orchestrator")
   assert.equal(config.agent.orchestrator.model, "override/model")
   assert.match(config.agent.orchestrator.prompt, /Keep reports concise\./)
@@ -104,13 +108,16 @@ test("configuration is idempotent and custom orchestrators are primary agents", 
 
   assert.equal(config.agent.lead.mode, "primary")
   assert.equal(config.default_agent, "lead")
+  assert.equal(config.agent.worker.mode, "subagent")
+  assert.equal(config.agent.worker.model, "fallback/model")
+  assert.match(config.agent.worker.prompt, /# Worker Mode/)
   assert.deepEqual(config.agent.lead.permission, {
     task: "allow",
     todowrite: "allow",
     question: "allow",
   })
   assert.equal((config.agent.lead.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
-  assert.deepEqual(logs.at(-1).body.extra.routedAgents, ["general", "explore", "helper"])
+  assert.deepEqual(logs.at(-1).body.extra.routedAgents, ["general", "explore", "worker", "helper"])
 })
 
 test("invalid options fail with a useful error instead of a runtime TypeError", async () => {
