@@ -1,0 +1,34 @@
+{
+  "name": "opencode-agent-tree",
+  "version": "0.1.0",
+  "description": "Force opencode to act as an orchestrator: every task is decomposed and delegated to subagents, with user-configurable models per agent.",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "orchestrator",
+    "subagent",
+    "task",
+    "delegate",
+    "swarm"
+  ],
+  "author": "opencode-agent-tree contributors",
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "typescript": "^5.6.0"
+  }
+}

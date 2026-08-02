@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "./src/index.ts",
+      {
+        "subagentModel": "opencode-go/deepseek-v4-flash",
+        "instructions": "For this project, never delegate more than 3 subtasks at once."
+      }
+    ]
+  ]
+}
