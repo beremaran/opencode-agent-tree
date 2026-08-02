@@ -1,5 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
+const PLUGIN_ID = "@beremaran/opencode-agent-tree"
+const DIRECTIVE_MARKER = "# Orchestrator Mode"
+
 export interface OrchestratorOptions {
   /**
    * Model used for ALL delegated work — every subagent spawned via the
@@ -55,10 +58,20 @@ type AgentLike = {
   permission?: Record<string, unknown>
 }
 
+type NormalizedOptions = {
+  subagentModel: string
+  orchestratorModel?: string
+  orchestratorAgent: string
+  agents?: string[]
+  agentModels: Record<string, string>
+  instructions?: string
+  blockedTools: string[]
+}
+
 const DEFAULTS = {
   orchestratorAgent: "build",
   blockedTools: ["edit", "bash"],
-} satisfies Partial<OrchestratorOptions>
+} as const
 
 /**
  * Built-in agents are not present in the merged config when the plugin
@@ -68,9 +81,76 @@ const DEFAULTS = {
 const BUILTIN_SUBAGENTS = ["general", "explore"]
 
 const isSubagentLike = (agent: AgentLike | undefined) =>
-  !agent || !agent.mode || agent.mode === "subagent" || agent.mode === "all"
+  !agent || agent.mode === undefined || agent.mode === "subagent" || agent.mode === "all"
 
-const orchestratorDirective = (opts: Required<OrchestratorOptions>) => {
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const invalidOption = (name: string, expected: string): never => {
+  throw new Error(`[${PLUGIN_ID}] The \`${name}\` option must be ${expected}.`)
+}
+
+const nonEmptyString = (value: unknown, name: string): string => {
+  if (typeof value !== "string") invalidOption(name, "a non-empty string")
+  const trimmed = (value as string).trim()
+  if (trimmed === "") invalidOption(name, "a non-empty string")
+  return trimmed
+}
+
+const optionalString = (value: unknown, name: string): string | undefined => {
+  if (value === undefined || value === "") return undefined
+  return nonEmptyString(value, name)
+}
+
+const stringArray = (value: unknown, name: string): string[] => {
+  if (!Array.isArray(value)) invalidOption(name, "an array of non-empty strings")
+  const entries = value as unknown[]
+  return [...new Set(entries.map((entry: unknown) => nonEmptyString(entry, `${name} entries`)))]
+}
+
+const stringRecord = (value: unknown, name: string): Record<string, string> => {
+  if (!isRecord(value)) invalidOption(name, "an object with non-empty string values")
+  const record = value as Record<string, unknown>
+
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [
+      nonEmptyString(key, `${name} keys`),
+      nonEmptyString(entry, `${name} values`),
+    ]),
+  )
+}
+
+const REQUIRED_MODEL_MESSAGE =
+  `[${PLUGIN_ID}] The \`subagentModel\` option is required, e.g. ["${PLUGIN_ID}", { "subagentModel": "anthropic/claude-sonnet-4-6" }]`
+
+const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
+  const candidate = rawOptions == null ? {} : rawOptions
+  if (!isRecord(candidate)) invalidOption("options", "an object")
+  const options = candidate as Record<string, unknown>
+
+  if (options.subagentModel === undefined || options.subagentModel === "") {
+    throw new Error(REQUIRED_MODEL_MESSAGE)
+  }
+
+  const blockedTools =
+    options.blockedTools === undefined ? [...DEFAULTS.blockedTools] : stringArray(options.blockedTools, "blockedTools")
+  const agents = options.agents === undefined ? undefined : stringArray(options.agents, "agents")
+
+  return {
+    subagentModel: nonEmptyString(options.subagentModel, "subagentModel"),
+    orchestratorModel: optionalString(options.orchestratorModel, "orchestratorModel"),
+    orchestratorAgent:
+      options.orchestratorAgent === undefined
+        ? DEFAULTS.orchestratorAgent
+        : nonEmptyString(options.orchestratorAgent, "orchestratorAgent"),
+    agents,
+    agentModels: options.agentModels === undefined ? {} : stringRecord(options.agentModels, "agentModels"),
+    instructions: optionalString(options.instructions, "instructions"),
+    blockedTools,
+  }
+}
+
+const orchestratorDirective = (opts: NormalizedOptions) => {
   const blocked = opts.blockedTools.length > 0 ? opts.blockedTools.join(", ") : "none"
   const extra = opts.instructions ? `\n\n${opts.instructions}` : ""
   return `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
@@ -99,59 +179,74 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 }
 
 export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
-  const opts = { ...DEFAULTS, ...(options ?? {}) } as Required<OrchestratorOptions>
-
-  if (!opts.subagentModel) {
-    const message =
-      '[@beremaran/opencode-agent-tree] The `subagentModel` option is required, e.g. ["@beremaran/opencode-agent-tree", { "subagentModel": "anthropic/claude-sonnet-4-6" }]'
-    await client.app.log({ body: { service: "@beremaran/opencode-agent-tree", level: "error", message } })
-    throw new Error(message)
+  let opts: NormalizedOptions
+  try {
+    opts = normalizeOptions(options)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : `[${PLUGIN_ID}] Invalid plugin options.`
+    await client.app.log({ body: { service: PLUGIN_ID, level: "error", message } })
+    throw error
   }
 
   return {
     config: async (cfg) => {
       const agent = (cfg.agent ??= {}) as Record<string, AgentLike>
+      const hasAgent = (name: string) => Object.prototype.hasOwnProperty.call(agent, name)
+      const getAgent = (name: string) => (hasAgent(name) ? agent[name] : undefined)
+      const ensureAgent = (name: string) => {
+        if (!hasAgent(name) || agent[name] == null) {
+          Object.defineProperty(agent, name, {
+            configurable: true,
+            enumerable: true,
+            value: {},
+            writable: true,
+          })
+        }
+        return agent[name]
+      }
 
       const inScope = (name: string, def: AgentLike | undefined) =>
         !def?.disable && isSubagentLike(def) && name !== opts.orchestratorAgent
 
-      const targets = opts.agents
-        ? opts.agents.filter((name) => name !== opts.orchestratorAgent)
-        : [
-            ...BUILTIN_SUBAGENTS,
-            ...Object.keys(agent).filter((name) => inScope(name, agent[name])),
-          ]
+      if (getAgent(opts.orchestratorAgent)?.disable) {
+        throw new Error(`[${PLUGIN_ID}] The orchestrator agent \`${opts.orchestratorAgent}\` is disabled.`)
+      }
+
+      const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, ...Object.keys(agent)]
+      const targets = [...new Set(candidates)].filter((name) => inScope(name, getAgent(name)))
 
       // Route every delegation target to the user-chosen model.
       for (const name of targets) {
-        if (!inScope(name, agent[name])) continue
-        const def = (agent[name] ??= {})
+        const def = ensureAgent(name)
         const model = opts.agentModels?.[name] ?? opts.subagentModel
         if (!def.model) def.model = model
       }
 
       // Configure the orchestrator: model, hard tool block, and the
       // delegation directive as its system prompt.
-      const orchestrator = (agent[opts.orchestratorAgent] ??= {})
+      const orchestrator = ensureAgent(opts.orchestratorAgent)
+      orchestrator.mode ??= "primary"
       if (opts.orchestratorModel) orchestrator.model = opts.orchestratorModel
       if (opts.blockedTools.length > 0) {
         const permission = { ...orchestrator.permission }
         for (const tool of opts.blockedTools) permission[tool] = "deny"
         orchestrator.permission = permission
       }
-      orchestrator.prompt = orchestrator.prompt
-        ? `${orchestrator.prompt}\n\n${orchestratorDirective(opts)}`
-        : orchestratorDirective(opts)
+      if (!orchestrator.prompt?.includes(DIRECTIVE_MARKER)) {
+        orchestrator.prompt = orchestrator.prompt
+          ? `${orchestrator.prompt}\n\n${orchestratorDirective(opts)}`
+          : orchestratorDirective(opts)
+      }
 
       await client.app.log({
         body: {
-          service: "@beremaran/opencode-agent-tree",
+          service: PLUGIN_ID,
           level: "info",
           message: `Orchestrator "${opts.orchestratorAgent}" enabled; subagents -> ${opts.subagentModel}`,
           extra: {
             routedAgents: targets,
             orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
-            blockedTools: opts.blockedTools,
+            blockedTools: [...opts.blockedTools],
           },
         },
       })

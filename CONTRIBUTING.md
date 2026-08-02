@@ -6,7 +6,7 @@ Thanks for contributing to @beremaran/opencode-agent-tree!
 
 1. Fork the repository and clone your fork.
 2. `npm install`
-3. `npm run typecheck`
+3. `npm run check`
 
 The plugin has no runtime dependencies — it runs as a single `config` hook
 loaded by opencode (Bun runtime). There is no build step.
@@ -36,7 +36,7 @@ Orchestrator "build" enabled; subagents -> <subagentModel>
 ## Pull requests
 
 - Keep changes minimal and scoped.
-- Run `npm run typecheck` before pushing; CI enforces it.
+- Run `npm run check` before pushing; CI enforces it.
 - If you change the directive prompt (`orchestratorDirective` in `src/index.ts`),
   update the copy in `README.md` to match.
 - Update `package.json` `version` only when asked to prepare a release.

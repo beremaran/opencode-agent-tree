@@ -122,7 +122,7 @@ From npm:
 
 ```bash
 npm install
-npm run typecheck
+npm run check
 ```
 
 The plugin is a single `config` hook (`src/index.ts`): it mutates the merged opencode config at startup — routing subagent models, denying the orchestrator's hands-on tools, and installing the directive prompt. To verify against a live opencode, run from this repo (its `opencode.json` is pre-wired) and watch for the startup log line:
@@ -138,7 +138,7 @@ npm login
 npm publish
 ```
 
-The package ships raw TypeScript (`main: src/index.ts`) — opencode loads plugins with Bun, no build step needed. Before publishing, fill in `repository` and `author` in `package.json` (see [Contributing](CONTRIBUTING.md)).
+The package ships raw TypeScript (`main: src/index.ts`) — opencode loads plugins with Bun, so no build step is needed. The repository and author metadata are already set in `package.json`.
 
 ## License
 

@@ -15,7 +15,9 @@
     "src"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types test/index.test.mjs",
+    "check": "npm run typecheck && npm test"
   },
   "keywords": [
     "opencode",
@@ -36,7 +38,7 @@
     "@opencode-ai/plugin": "*"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "latest",
+    "@opencode-ai/plugin": "1.18.11",
     "typescript": "^5.6.0"
   }
 }
