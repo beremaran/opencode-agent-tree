@@ -6,6 +6,7 @@ An [opencode](https://opencode.ai) plugin that turns the model into an **orchest
 
 - Dedicated `orchestrator` primary agent; the built-in `build` agent stays untouched.
 - Change the delegated model from chat with `/subagent-model provider/model`.
+- Set a default effort/variant and per-agent overrides for delegated models.
 - Simple setup: one plugin entry, one required option.
 - Works with built-in subagents (`general`, `explore`) and any user-defined agents.
 - Enforcement is layered: prompt directive + hard tool block.
@@ -106,10 +107,12 @@ The change applies immediately to subsequent delegations in the running opencode
 | Option              | Type                 | Default                          | Description |
 | ------------------- | -------------------- | -------------------------------- | ----------- |
 | `subagentModel`     | `string`             | **required**                     | Model for all delegated work, e.g. `"anthropic/claude-sonnet-4-6"`. Agents with an explicit `model` in `opencode.json` are never overridden. |
+| `subagentEffort`    | `string`             | model default                    | Default OpenCode variant/effort for delegated agents that do not define one, e.g. `"high"`. |
 | `orchestratorModel` | `string`             | agent model, else `model`        | Model for the orchestrator itself. |
 | `orchestratorAgent` | `string`             | `"orchestrator"`                 | Name of the dedicated primary agent that acts as the orchestrator. |
 | `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. |
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. |
+| `agentEfforts`      | `Record<string,string>` | `{}`                          | Per-agent OpenCode variant/effort overrides, wins over `subagentEffort`. Explicit agent `variant` values still take precedence. |
 | `instructions`      | `string`             | —                                | Extra rules appended to the orchestrator system prompt. |
 | `blockedTools`      | `string[]`           | `["edit", "write", "apply_patch", "bash"]` | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. |
 
@@ -123,8 +126,10 @@ The change applies immediately to subsequent delegations in the running opencode
       "@beremaran/opencode-agent-tree",
       {
         "subagentModel": "anthropic/claude-sonnet-4-6",
+        "subagentEffort": "high",
         "orchestratorModel": "anthropic/claude-opus-4-5",
         "agentModels": { "explore": "anthropic/claude-haiku-4-5" },
+        "agentEfforts": { "explore": "low" },
         "instructions": "Never delegate more than 3 subtasks at once."
       }
     ]
@@ -138,6 +143,8 @@ The change applies immediately to subsequent delegations in the running opencode
 - Subagents keep their default tools; only the dedicated orchestrator's hands-on tools are restricted. The built-in `build` and `plan` agents remain available unchanged.
 - The directive is installed on the orchestrator agent only — subagents never receive it.
 - Built-in subagents (`general`, `explore`) and every user-defined subagent/all-mode agent are routed to `subagentModel`; agents with an explicit `model` in `opencode.json` are respected.
+- `subagentEffort` and `agentEfforts` map to OpenCode's agent `variant` field. Values such as `low`, `medium`, and `high` are model/provider-specific; the plugin only validates that they are non-empty strings.
+- An agent's explicit `variant` in `opencode.json` takes precedence over plugin effort settings.
 
 ## Development
 

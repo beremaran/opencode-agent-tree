@@ -22,16 +22,18 @@ test("routes only eligible agents and preserves explicit models", async () => {
   const { config, logs } = await apply(
     {
       subagentModel: "fallback/model",
+      subagentEffort: "high",
       orchestratorModel: "override/model",
       instructions: "Keep reports concise.",
       agentModels: { worker: "special/model" },
+      agentEfforts: { explore: "low", worker: "medium" },
     },
     {
       model: "orchestrator/model",
       agent: {
         build: { mode: "primary", model: "existing/model", permission: { edit: "allow" } },
         worker: { mode: "subagent" },
-        existing: { mode: "all", model: "explicit/model" },
+        existing: { mode: "all", model: "explicit/model", variant: "custom" },
         primary: { mode: "primary" },
         disabled: { mode: "subagent", disable: true },
       },
@@ -43,6 +45,10 @@ test("routes only eligible agents and preserves explicit models", async () => {
   assert.equal(config.agent.explore.model, "fallback/model")
   assert.equal(config.agent.worker.model, "special/model")
   assert.equal(config.agent.existing.model, "explicit/model")
+  assert.equal(config.agent.general.variant, "high")
+  assert.equal(config.agent.explore.variant, "low")
+  assert.equal(config.agent.worker.variant, "medium")
+  assert.equal(config.agent.existing.variant, "custom")
   assert.equal(config.agent.primary.model, undefined)
   assert.equal(config.agent.disabled.model, undefined)
   assert.deepEqual(config.agent.build, {
@@ -129,6 +135,16 @@ test("invalid options fail with a useful error instead of a runtime TypeError", 
   ]) {
     const { input, logs } = createInput()
     await assert.rejects(() => OrchestratorPlugin(input, options), /blockedTools|agents/)
+    assert.equal(logs.at(-1).body.level, "error")
+  }
+
+  for (const options of [
+    { subagentModel: "fallback/model", subagentEffort: 3 },
+    { subagentModel: "fallback/model", agentEfforts: null },
+    { subagentModel: "fallback/model", agentEfforts: { explore: "" } },
+  ]) {
+    const { input, logs } = createInput()
+    await assert.rejects(() => OrchestratorPlugin(input, options), /subagentEffort|agentEfforts/)
     assert.equal(logs.at(-1).body.level, "error")
   }
 })

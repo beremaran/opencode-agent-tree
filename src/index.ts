@@ -18,6 +18,12 @@ export interface OrchestratorOptions {
   subagentModel: string
 
   /**
+   * Effort/variant applied to delegated agents that do not define one.
+   * The value must be a variant supported by the selected model.
+   */
+  subagentEffort?: string
+
+  /**
    * Model for the orchestrator agent itself. Defaults to the agent's
    * existing model, falling back to the top-level `model` setting.
    */
@@ -42,6 +48,12 @@ export interface OrchestratorOptions {
   agentModels?: Record<string, string>
 
   /**
+   * Per-agent effort/variant overrides, keyed by agent name. Wins over
+   * `subagentEffort`; an agent's explicit `variant` still takes precedence.
+   */
+  agentEfforts?: Record<string, string>
+
+  /**
    * Extra rules appended verbatim to the orchestrator's system prompt.
    */
   instructions?: string
@@ -56,6 +68,7 @@ export interface OrchestratorOptions {
 
 type AgentLike = {
   model?: string
+  variant?: string
   mode?: string
   disable?: boolean
   description?: string
@@ -77,10 +90,12 @@ type ModelReference = {
 
 type NormalizedOptions = {
   subagentModel: string
+  subagentEffort?: string
   orchestratorModel?: string
   orchestratorAgent: string
   agents?: string[]
   agentModels: Record<string, string>
+  agentEfforts: Record<string, string>
   instructions?: string
   blockedTools: string[]
 }
@@ -139,14 +154,18 @@ const stringArray = (value: unknown, name: string): string[] => {
   return [...new Set(entries.map((entry: unknown) => nonEmptyString(entry, `${name} entries`)))]
 }
 
-const stringRecord = (value: unknown, name: string): Record<string, string> => {
+const stringRecord = (
+  value: unknown,
+  name: string,
+  parseValue: (value: unknown, name: string) => string = nonEmptyString,
+): Record<string, string> => {
   if (!isRecord(value)) invalidOption(name, "an object with non-empty string values")
   const record = value as Record<string, unknown>
 
   return Object.fromEntries(
     Object.entries(record).map(([key, entry]) => [
       nonEmptyString(key, `${name} keys`),
-      modelReference(entry, `${name} values`).raw,
+      parseValue(entry, `${name} values`),
     ]),
   )
 }
@@ -169,13 +188,18 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
 
   return {
     subagentModel: modelReference(options.subagentModel, "subagentModel").raw,
+    subagentEffort: optionalString(options.subagentEffort, "subagentEffort"),
     orchestratorModel: optionalString(options.orchestratorModel, "orchestratorModel"),
     orchestratorAgent:
       options.orchestratorAgent === undefined
         ? DEFAULTS.orchestratorAgent
         : nonEmptyString(options.orchestratorAgent, "orchestratorAgent"),
     agents,
-    agentModels: options.agentModels === undefined ? {} : stringRecord(options.agentModels, "agentModels"),
+    agentModels:
+      options.agentModels === undefined
+        ? {}
+        : stringRecord(options.agentModels, "agentModels", (entry, entryName) => modelReference(entry, entryName).raw),
+    agentEfforts: options.agentEfforts === undefined ? {} : stringRecord(options.agentEfforts, "agentEfforts"),
     instructions: optionalString(options.instructions, "instructions"),
     blockedTools,
   }
@@ -222,6 +246,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
 
   let activeSubagentModel = modelReference(opts.subagentModel, "subagentModel")
   const routedModels = new Map<string, ModelReference | undefined>()
+  const routedEfforts = new Map<string, string>()
   const routedDefinitions = new Map<string, AgentLike>()
 
   return {
@@ -258,6 +283,9 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           routedDefinitions.delete(name)
         }
       }
+      for (const name of routedEfforts.keys()) {
+        if (!targetSet.has(name)) routedEfforts.delete(name)
+      }
 
       // Route every delegation target to the user-chosen model.
       for (const name of targets) {
@@ -269,6 +297,12 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           def.model = model.raw
           routedModels.set(name, override ? model : undefined)
           routedDefinitions.set(name, def)
+        }
+
+        const effort = opts.agentEfforts[name] ?? opts.subagentEffort
+        if (effort && (!def.variant || routedEfforts.has(name))) {
+          def.variant = effort
+          routedEfforts.set(name, effort)
         }
       }
 
@@ -314,6 +348,8 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           extra: {
             routedAgents: targets,
             orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
+            subagentEffort: opts.subagentEffort ?? "(model default)",
+            agentEfforts: { ...opts.agentEfforts },
             orchestratorTools: [...ORCHESTRATOR_TOOLS],
             blockedTools: [...opts.blockedTools],
           },
