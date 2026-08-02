@@ -188,7 +188,7 @@ test("chat command changes only fallback-routed subagent models", async () => {
   assert.equal(config.agent.explore.model, "special/explore")
   assert.equal(config.agent.explicit.model, "user/model")
   assert.match(parts[0].text, /openrouter\/anthropic\/claude-sonnet/)
-  assert.match(logs.at(-1).body.message, /Subagent model changed from chat/)
+  assert.match(logs.at(-1).body.message, /Changed the default subagent model/)
 
   const fallbackMessage = { agent: "general", model: { providerID: "old", modelID: "model" } }
   await hooks["chat.message"]({ sessionID: "child", agent: "general" }, { message: fallbackMessage, parts: [] })

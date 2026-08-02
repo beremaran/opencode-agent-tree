@@ -5,7 +5,7 @@
       "./src/index.ts",
       {
         "subagentModel": "opencode-go/deepseek-v4-flash",
-        "instructions": "For this project, never delegate more than 3 subtasks at once."
+        "instructions": "For this project, never delegate more than three subtasks at once."
       }
     ]
   ]

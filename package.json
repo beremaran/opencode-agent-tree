@@ -5,7 +5,7 @@
     "access": "public",
     "provenance": true
   },
-  "description": "Force opencode to act as an orchestrator: every task is decomposed and delegated to subagents, with user-configurable models per agent.",
+  "description": "An opencode plugin that enforces subagent delegation through dedicated orchestrator and worker agents with configurable model routing.",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
@@ -24,9 +24,9 @@
     "plugin",
     "orchestrator",
     "subagent",
-    "task",
-    "delegate",
-    "swarm"
+    "delegation",
+    "multi-agent",
+    "ai-agent"
   ],
   "author": "Berke Arslan <berke@beremaran.com>",
   "repository": {

@@ -5,14 +5,14 @@ const DIRECTIVE_MARKER = "# Orchestrator Mode"
 const WORKER_DIRECTIVE_MARKER = "# Worker Mode"
 const MODEL_COMMAND = "subagent-model"
 const MODEL_COMMAND_TEMPLATE =
-  "The delegated subagent model is now `$ARGUMENTS` for this running opencode process. Confirm the active model in one sentence and do nothing else."
+  "Use `$ARGUMENTS` as the default model for subsequent delegated tasks in this opencode process. Confirm the active subagent model in one sentence and do nothing else."
 const ORCHESTRATOR_TOOLS = ["task", "todowrite", "question"] as const
 const WORKER_AGENT = "worker"
 
 export interface OrchestratorOptions {
   /**
-   * Model used for ALL delegated work — every subagent spawned via the
-   * `task` tool. Format: "provider/model-id" (e.g. "anthropic/claude-sonnet-4-6").
+   * Default model for routed subagents. Format: "provider/model-id"
+   * (e.g. "anthropic/claude-sonnet-4-6").
    *
    * Required. Agents that already declare an explicit `model` in
    * opencode.json are never overridden.
@@ -21,7 +21,7 @@ export interface OrchestratorOptions {
 
   /**
    * Effort/variant applied to delegated agents that do not define one.
-   * The value must be a variant supported by the selected model.
+   * The value should be a variant supported by the selected model.
    */
   subagentEffort?: string
 
@@ -37,10 +37,10 @@ export interface OrchestratorOptions {
   orchestratorAgent?: string
 
   /**
-   * Restrict which agents get routed to `subagentModel`. Defaults to every
-   * built-in subagent (general, explore), the dedicated `worker` agent, plus
-   * all subagent/all-mode agents already declared by the user. The
-   * orchestrator agent is never routed.
+   * Restrict model and effort routing to these agents. Defaults to the
+   * built-in `general` and `explore` subagents, the dedicated `worker` agent,
+   * and every user-defined subagent or all-mode agent. The orchestrator is
+   * never routed.
    */
   agents?: string[]
 
@@ -118,13 +118,13 @@ const BUILTIN_SUBAGENTS = ["general", "explore"]
 
 const workerDirective = `# Worker Mode (enforced by ${PLUGIN_ID})
 
-You are a WORKER. Execute the complete task assigned by the orchestrator directly.
+You are the worker. Complete the task assigned by the orchestrator directly.
 
 ## Worker rules
 1. Inspect the relevant code and context before acting.
 2. Implement, test, and verify the assigned task with the tools available to you.
 3. Do not delegate the task further unless the orchestrator explicitly asks you to.
-4. Report what you changed, what you verified, and any remaining blocker concisely.`
+4. Report your changes, verification, and any remaining blockers concisely.`
 
 const isSubagentLike = (agent: AgentLike | undefined) =>
   !agent || agent.mode === undefined || agent.mode === "subagent" || agent.mode === "all"
@@ -185,7 +185,7 @@ const stringRecord = (
 }
 
 const REQUIRED_MODEL_MESSAGE =
-  `[${PLUGIN_ID}] The \`subagentModel\` option is required, e.g. ["${PLUGIN_ID}", { "subagentModel": "anthropic/claude-sonnet-4-6" }]`
+  `[${PLUGIN_ID}] The \`subagentModel\` option is required. Configure the plugin as ["${PLUGIN_ID}", { "subagentModel": "anthropic/claude-sonnet-4-6" }].`
 
 const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
   const candidate = rawOptions == null ? {} : rawOptions
@@ -220,33 +220,36 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
 }
 
 const orchestratorDirective = (opts: NormalizedOptions) => {
-  const blocked = opts.blockedTools.length > 0 ? opts.blockedTools.join(", ") : "none"
+  const toolRestriction =
+    opts.blockedTools.length > 0
+      ? `The following hands-on tools are blocked: ${opts.blockedTools.join(", ")}.`
+      : "No hands-on tools are blocked; prompt-only enforcement is active."
   const extra = opts.instructions ? `\n\n${opts.instructions}` : ""
   return `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
 
-You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, delegate, and review.
+You are the orchestrator. Plan, decompose, delegate, and review. Do not perform hands-on work.
 
-## Non-negotiable rules
-1. Treat every user request as a project: break it into discrete, independently verifiable subtasks before touching anything.
-2. Delegate EVERY subtask with the \`task\` tool to a subagent. Never perform implementation work yourself.
-3. You only: plan, write subtask briefs, dispatch agents, review their reports, and summarize results for the user.
-4. Dispatch independent subtasks in parallel (multiple \`task\` calls in a single message). Never run dependent subtasks concurrently — wait for each result before dispatching the next.
+## Required behavior
+1. Break every request into discrete, independently verifiable subtasks.
+2. Delegate every subtask with the \`task\` tool. Never perform implementation work yourself.
+3. Limit your work to planning, writing subtask briefs, dispatching agents, reviewing reports, and summarizing results.
+4. Dispatch independent subtasks in parallel with multiple \`task\` calls in one message. Run dependent subtasks sequentially.
 5. Give each subagent a complete, self-contained brief: goal, constraints, files involved, verification steps, and exactly what to report back.
-6. Review every subagent report. If work is incomplete or wrong, delegate the fix to a subagent — never fix it yourself.
-7. Reuse a running subagent via its task_id when follow-up work belongs to the same context.
-8. Keep the user informed: report what was delegated to whom, the results, blockers, and the final state.
+6. Review every report. If work is incomplete or incorrect, delegate the fix instead of making it yourself.
+7. Reuse a running subagent through its \`task_id\` when follow-up work needs the same context.
+8. Keep the user informed about delegated work, results, blockers, and the final state.
 
 ## Tool discipline
-- \`task\` for all work (mandatory), \`todowrite\` to track subtasks, \`question\` only to clarify genuinely ambiguous requests.
+- Use \`task\` for all delegated work, \`todowrite\` to track subtasks, and \`question\` only for genuinely ambiguous requests.
 - Keep the task list current so the user can see what is active, completed, or blocked.
-- \`read\`/\`glob\`/\`grep\`/\`webfetch\`/\`websearch\` only when needed to write a better brief or verify a result.
-- Hands-on tools are hard-blocked for you (${blocked}). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
+- Use \`read\`, \`glob\`, \`grep\`, \`webfetch\`, and \`websearch\` only to prepare a better brief or verify a result.
+- ${toolRestriction} If a subagent lacks a required tool, tell the user instead of taking over its work.
 
 ## Default delegation
-- \`worker\` — hands-on implementation, refactoring, testing, and verification.
-- \`explore\` — codebase research, locating code, understanding existing implementations.
-- \`general\` — complex research or any task without a more specific subagent.
-- Prefer \`worker\` for hands-on work and the most specialized subagent for each other subtask; fall back to \`general\`.${extra}`
+- \`worker\`: implementation, refactoring, testing, and verification.
+- \`explore\`: codebase research, code discovery, and implementation analysis.
+- \`general\`: complex research or work without a more specific subagent.
+- Prefer \`worker\` for hands-on work and the most specialized subagent for every other task. Fall back to \`general\`.${extra}`
 }
 
 export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
@@ -307,7 +310,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
         const def = ensureAgent(name)
         if (name === WORKER_AGENT) {
           def.mode ??= "subagent"
-          def.description ??= "Executes implementation, testing, and verification work delegated by the orchestrator."
+          def.description ??= "Handles implementation, refactoring, testing, and verification delegated by the orchestrator."
           if (!def.prompt?.includes(WORKER_DIRECTIVE_MARKER)) {
             def.prompt = def.prompt ? `${def.prompt}\n\n${workerDirective}` : workerDirective
           }
@@ -332,7 +335,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
       // delegation directive as its system prompt.
       const orchestrator = ensureAgent(opts.orchestratorAgent)
       orchestrator.mode = "primary"
-      orchestrator.description ??= "Plans, delegates, and reviews work performed by subagents."
+      orchestrator.description ??= "Plans work, delegates it to subagents, and reviews the results."
       if (opts.orchestratorModel) orchestrator.model = opts.orchestratorModel
       const permission = { ...orchestrator.permission }
       for (const tool of ORCHESTRATOR_TOOLS) permission[tool] = "allow"
@@ -357,7 +360,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
       }
       command[MODEL_COMMAND] ??= {
         template: MODEL_COMMAND_TEMPLATE,
-        description: "Change the model used by delegated subagents",
+        description: "Change the default model for delegated subagents",
         agent: opts.orchestratorAgent,
         subtask: false,
       }
@@ -366,7 +369,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
         body: {
           service: PLUGIN_ID,
           level: "info",
-          message: `Orchestrator "${opts.orchestratorAgent}" enabled; subagents -> ${opts.subagentModel}`,
+          message: `Enabled orchestrator "${opts.orchestratorAgent}" with default subagent model "${opts.subagentModel}".`,
           extra: {
             routedAgents: targets,
             orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
@@ -390,7 +393,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
 
       for (const part of output.parts) {
         if (part.type === "text") {
-          part.text = `The delegated subagent model is now \`${activeSubagentModel.raw}\` for this running opencode process. Confirm this change in one sentence and do nothing else.`
+          part.text = `Use \`${activeSubagentModel.raw}\` as the default model for subsequent delegated tasks in this opencode process. Confirm the active subagent model in one sentence and do nothing else.`
         }
       }
 
@@ -398,7 +401,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
         body: {
           service: PLUGIN_ID,
           level: "info",
-          message: `Subagent model changed from chat -> ${activeSubagentModel.raw}`,
+          message: `Changed the default subagent model to "${activeSubagentModel.raw}" for this opencode process.`,
         },
       })
     },

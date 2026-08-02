@@ -1,43 +1,53 @@
 # Contributing
 
-Thanks for contributing to @beremaran/opencode-agent-tree!
+Contributions to `@beremaran/opencode-agent-tree` are welcome.
 
-## Getting started
+## Local setup
 
 1. Fork the repository and clone your fork.
-2. `npm install`
-3. `npm run check`
+2. Install dependencies with `npm ci`.
+3. Run the checks with `npm run check`.
 
-The plugin has no runtime dependencies — it runs as a single `config` hook
-loaded by opencode (Bun runtime). There is no build step.
+The package has no production dependencies or build step. It uses the opencode plugin API and ships TypeScript source that opencode loads with Bun.
+
+## Architecture
+
+The plugin registers three opencode hooks:
+
+- `config` creates the orchestrator and worker agents, applies permissions, and configures model routing.
+- `command.execute.before` validates and applies `/subagent-model` changes.
+- `chat.message` selects the active model for routed subagents.
+
+Unit tests cover option validation, agent routing, prompt installation, permissions, and runtime model changes.
 
 ## Manual testing
 
-The repo root ships an `opencode.json` pre-wired to load `./src/index.ts`.
-Run `opencode` from the repo root, then ask something that requires a tool,
-e.g.:
+The repository's `opencode.json` loads `./src/index.ts` directly. Start opencode from the repository root, then submit a request that requires file changes, such as:
 
-> Create a file named test.txt containing "hello".
+> Create a file named `test.txt` containing `hello`.
 
-Expected behavior:
+Verify that:
 
-1. The dedicated `orchestrator` agent does **not** edit the file itself; the
-   built-in `build` agent remains unchanged.
-2. It spawns a subagent via `task` (see the `✓ Create test.txt file — General Agent`
-   step in the TUI).
-3. The subagent streams with the model configured in `subagentModel`
-   (check `opencode run --print-logs` for the `stream` lines).
+1. The `orchestrator` delegates the task instead of editing the file.
+2. The `worker` performs the requested change.
+3. The worker uses the model configured in `subagentModel`.
+4. The startup logs include `Enabled orchestrator "orchestrator" with default subagent model "<subagentModel>".`
 
-Verify the startup log line is present:
-
-```
-Orchestrator "orchestrator" enabled; subagents -> <subagentModel>
-```
+Run `/subagent-model provider/model-id` and submit another delegated task to verify runtime model switching.
 
 ## Pull requests
 
-- Keep changes minimal and scoped.
-- Run `npm run check` before pushing; CI enforces it.
-- If you change the directive prompt (`orchestratorDirective` in `src/index.ts`),
-  update the copy in `README.md` to match.
-- Update `package.json` `version` only when asked to prepare a release.
+- Keep changes focused and include tests for behavior changes.
+- Run `npm run check` before pushing. CI runs the same command.
+- Keep user-facing documentation synchronized with option, prompt, command, and log changes.
+- Do not update the version in `package.json` unless the change is part of a release.
+
+## Releases
+
+Publishing is handled by [`.github/workflows/publish.yml`](.github/workflows/publish.yml) through npm trusted publishing.
+
+1. Update the version in `package.json` and `package-lock.json`.
+2. Run `npm run check` and `npm pack --dry-run`.
+3. Push a tag that exactly matches the package version, such as `v0.2.0`.
+
+The workflow verifies the tag, runs the checks, inspects the package contents, and publishes with npm provenance.
