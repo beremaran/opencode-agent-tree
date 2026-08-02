@@ -22,7 +22,7 @@
     "delegate",
     "swarm"
   ],
-  "author": "opencode-agent-tree contributors",
+  "author": "Berke Arslan <berke@beremaran.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/beremaran/opencode-agent-tree.git"
