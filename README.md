@@ -4,7 +4,9 @@ An [opencode](https://opencode.ai) plugin that turns the model into an **orchest
 
 > **Renamed:** this package was previously published as `opencode-agent-tree`. It is now `@beremaran/opencode-agent-tree`; the old name is deprecated on npm.
 
-- Zero-config setup: one plugin entry, one required option.
+- Dedicated `orchestrator` primary agent; the built-in `build` agent stays untouched.
+- Change the delegated model from chat with `/subagent-model provider/model`.
+- Simple setup: one plugin entry, one required option.
 - Works with built-in subagents (`general`, `explore`) and any user-defined agents.
 - Enforcement is layered: prompt directive + hard tool block.
 
@@ -12,8 +14,8 @@ An [opencode](https://opencode.ai) plugin that turns the model into an **orchest
 
 Two independent enforcement layers:
 
-1. **System prompt directive** — a strict orchestrator prompt is installed as the orchestrator agent's system prompt (appended to any existing prompt it may have). Subagent prompts are untouched.
-2. **Hard tool block** — the orchestrator agent's `permission` config is set to `deny` for hands-on tools (`edit`, `bash` by default). The model physically cannot do the work itself.
+1. **System prompt directive** — a strict orchestrator prompt is installed on a dedicated `orchestrator` primary agent (appended to any existing prompt it may have). Subagent prompts and the built-in `build` agent are untouched.
+2. **Hard tool block** — the orchestrator agent's `permission` config is set to `deny` for hands-on tools (`edit`, `write`, `apply_patch`, and `bash` by default). The model physically cannot do the work itself.
 
 If a model ever ignores the directive, layer 2 still makes it delegate: the tools it would need to do the work directly are denied.
 
@@ -38,8 +40,9 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 
 ## Tool discipline
 - `task` for all work (mandatory), `todowrite` to track subtasks, `question` only to clarify genuinely ambiguous requests.
+- Keep the task list current so the user can see what is active, completed, or blocked.
 - `read`/`glob`/`grep`/`webfetch`/`websearch` only when needed to write a better brief or verify a result.
-- Hands-on tools are hard-blocked for you (blockedTools joined, "edit, bash" by default). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
+- Hands-on tools are hard-blocked for you (blockedTools joined, "edit, write, apply_patch, bash" by default). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
 
 ## Default delegation
 - `explore` — codebase research, locating code, understanding existing implementations.
@@ -75,11 +78,28 @@ From npm:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@beremaran/opencode-agent-tree", { "subagentModel": "anthropic/claude-sonnet-4-6" }]
+  "plugin": [
+    [
+      "@beremaran/opencode-agent-tree",
+      { "subagentModel": "anthropic/claude-sonnet-4-6" }
+    ]
+  ]
 }
 ```
 
 > Config is loaded at startup. **Restart opencode** after adding the plugin.
+
+The plugin adds and selects a dedicated `orchestrator` agent unless you already set `default_agent`. You can switch to `build` whenever you want to work directly.
+
+## Change the subagent model from chat
+
+Use the command added by the plugin:
+
+```text
+/subagent-model openai/gpt-5.2
+```
+
+The change applies immediately to subsequent delegations in the running opencode workspace process. It updates agents inheriting `subagentModel`; models explicitly set in `opencode.json` and `agentModels` overrides remain unchanged. Restarting opencode restores the configured `subagentModel`.
 
 ## Options
 
@@ -87,11 +107,11 @@ From npm:
 | ------------------- | -------------------- | -------------------------------- | ----------- |
 | `subagentModel`     | `string`             | **required**                     | Model for all delegated work, e.g. `"anthropic/claude-sonnet-4-6"`. Agents with an explicit `model` in `opencode.json` are never overridden. |
 | `orchestratorModel` | `string`             | agent model, else `model`        | Model for the orchestrator itself. |
-| `orchestratorAgent` | `string`             | `"build"`                        | Which agent acts as the orchestrator. |
+| `orchestratorAgent` | `string`             | `"orchestrator"`                 | Name of the dedicated primary agent that acts as the orchestrator. |
 | `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. |
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. |
 | `instructions`      | `string`             | —                                | Extra rules appended to the orchestrator system prompt. |
-| `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. |
+| `blockedTools`      | `string[]`           | `["edit", "write", "apply_patch", "bash"]` | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. |
 
 ## Example
 
@@ -114,7 +134,8 @@ From npm:
 
 ## Notes
 
-- Subagents keep their default tools; only the orchestrator is restricted. Switch to the `plan` agent or another primary anytime.
+- The orchestrator explicitly keeps `task`, `todowrite`, and `question` access so it can delegate, maintain a visible task list, and clarify blockers.
+- Subagents keep their default tools; only the dedicated orchestrator's hands-on tools are restricted. The built-in `build` and `plan` agents remain available unchanged.
 - The directive is installed on the orchestrator agent only — subagents never receive it.
 - Built-in subagents (`general`, `explore`) and every user-defined subagent/all-mode agent are routed to `subagentModel`; agents with an explicit `model` in `opencode.json` are respected.
 
@@ -125,18 +146,15 @@ npm install
 npm run check
 ```
 
-The plugin is a single `config` hook (`src/index.ts`): it mutates the merged opencode config at startup — routing subagent models, denying the orchestrator's hands-on tools, and installing the directive prompt. To verify against a live opencode, run from this repo (its `opencode.json` is pre-wired) and watch for the startup log line:
+The plugin configures agents at startup and uses chat/command hooks for runtime model switching. To verify against a live opencode, run from this repo (its `opencode.json` is pre-wired) and watch for the startup log line:
 
 ```
-Orchestrator "build" enabled; subagents -> <subagentModel>
+Orchestrator "orchestrator" enabled; subagents -> <subagentModel>
 ```
 
 ## Publishing
 
-```bash
-npm login
-npm publish
-```
+Publishing is handled by [`.github/workflows/publish.yml`](.github/workflows/publish.yml). Set that workflow as the trusted publisher for this package on npm, update `package.json` to the release version, then push the matching tag (for example, `v0.2.0`). The workflow rejects a tag that does not exactly match the package version, runs all checks, inspects the tarball, and publishes with npm OIDC/provenance.
 
 The package ships raw TypeScript (`main: src/index.ts`) — opencode loads plugins with Bun, so no build step is needed. The repository and author metadata are already set in `package.json`.
 

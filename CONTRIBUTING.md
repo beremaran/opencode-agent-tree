@@ -21,7 +21,8 @@ e.g.:
 
 Expected behavior:
 
-1. The orchestrator (`build`) does **not** edit the file itself.
+1. The dedicated `orchestrator` agent does **not** edit the file itself; the
+   built-in `build` agent remains unchanged.
 2. It spawns a subagent via `task` (see the `✓ Create test.txt file — General Agent`
    step in the TUI).
 3. The subagent streams with the model configured in `subagentModel`
@@ -30,7 +31,7 @@ Expected behavior:
 Verify the startup log line is present:
 
 ```
-Orchestrator "build" enabled; subagents -> <subagentModel>
+Orchestrator "orchestrator" enabled; subagents -> <subagentModel>
 ```
 
 ## Pull requests

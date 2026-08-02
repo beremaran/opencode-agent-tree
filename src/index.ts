@@ -2,6 +2,10 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 const PLUGIN_ID = "@beremaran/opencode-agent-tree"
 const DIRECTIVE_MARKER = "# Orchestrator Mode"
+const MODEL_COMMAND = "subagent-model"
+const MODEL_COMMAND_TEMPLATE =
+  "The delegated subagent model is now `$ARGUMENTS` for this running opencode process. Confirm the active model in one sentence and do nothing else."
+const ORCHESTRATOR_TOOLS = ["task", "todowrite", "question"] as const
 
 export interface OrchestratorOptions {
   /**
@@ -20,7 +24,7 @@ export interface OrchestratorOptions {
   orchestratorModel?: string
 
   /**
-   * Name of the orchestrator agent. Default: "build".
+   * Name of the orchestrator agent. Default: "orchestrator".
    */
   orchestratorAgent?: string
 
@@ -44,8 +48,8 @@ export interface OrchestratorOptions {
 
   /**
    * Tools hard-blocked for the orchestrator via its agent `permission`
-   * config. Default: ["edit", "bash"]. Pass `[]` for prompt-only
-   * enforcement.
+   * config. Default: ["edit", "write", "apply_patch", "bash"]. Pass `[]`
+   * for prompt-only enforcement.
    */
   blockedTools?: string[]
 }
@@ -54,8 +58,21 @@ type AgentLike = {
   model?: string
   mode?: string
   disable?: boolean
+  description?: string
   prompt?: string
   permission?: Record<string, unknown>
+}
+
+// `default_agent` is supported by opencode 1.18.x and its v2 config schema,
+// but is missing from the legacy Config type exported by plugin 1.18.11.
+type ConfigWithDefaultAgent = {
+  default_agent?: string
+}
+
+type ModelReference = {
+  raw: string
+  providerID: string
+  modelID: string
 }
 
 type NormalizedOptions = {
@@ -69,8 +86,8 @@ type NormalizedOptions = {
 }
 
 const DEFAULTS = {
-  orchestratorAgent: "build",
-  blockedTools: ["edit", "bash"],
+  orchestratorAgent: "orchestrator",
+  blockedTools: ["edit", "write", "apply_patch", "bash"],
 } as const
 
 /**
@@ -97,6 +114,20 @@ const nonEmptyString = (value: unknown, name: string): string => {
   return trimmed
 }
 
+const modelReference = (value: unknown, name: string): ModelReference => {
+  const raw = nonEmptyString(value, name)
+  const separator = raw.indexOf("/")
+  if (separator <= 0 || separator === raw.length - 1) {
+    invalidOption(name, 'a model reference in "provider/model-id" format')
+  }
+
+  return {
+    raw,
+    providerID: raw.slice(0, separator),
+    modelID: raw.slice(separator + 1),
+  }
+}
+
 const optionalString = (value: unknown, name: string): string | undefined => {
   if (value === undefined || value === "") return undefined
   return nonEmptyString(value, name)
@@ -115,7 +146,7 @@ const stringRecord = (value: unknown, name: string): Record<string, string> => {
   return Object.fromEntries(
     Object.entries(record).map(([key, entry]) => [
       nonEmptyString(key, `${name} keys`),
-      nonEmptyString(entry, `${name} values`),
+      modelReference(entry, `${name} values`).raw,
     ]),
   )
 }
@@ -137,7 +168,7 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
   const agents = options.agents === undefined ? undefined : stringArray(options.agents, "agents")
 
   return {
-    subagentModel: nonEmptyString(options.subagentModel, "subagentModel"),
+    subagentModel: modelReference(options.subagentModel, "subagentModel").raw,
     orchestratorModel: optionalString(options.orchestratorModel, "orchestratorModel"),
     orchestratorAgent:
       options.orchestratorAgent === undefined
@@ -169,6 +200,7 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 
 ## Tool discipline
 - \`task\` for all work (mandatory), \`todowrite\` to track subtasks, \`question\` only to clarify genuinely ambiguous requests.
+- Keep the task list current so the user can see what is active, completed, or blocked.
 - \`read\`/\`glob\`/\`grep\`/\`webfetch\`/\`websearch\` only when needed to write a better brief or verify a result.
 - Hands-on tools are hard-blocked for you (${blocked}). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
 
@@ -187,6 +219,10 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
     await client.app.log({ body: { service: PLUGIN_ID, level: "error", message } })
     throw error
   }
+
+  let activeSubagentModel = modelReference(opts.subagentModel, "subagentModel")
+  const routedModels = new Map<string, ModelReference | undefined>()
+  const routedDefinitions = new Map<string, AgentLike>()
 
   return {
     config: async (cfg) => {
@@ -214,28 +250,60 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
 
       const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, ...Object.keys(agent)]
       const targets = [...new Set(candidates)].filter((name) => inScope(name, getAgent(name)))
+      const targetSet = new Set(targets)
+
+      for (const name of routedModels.keys()) {
+        if (!targetSet.has(name)) {
+          routedModels.delete(name)
+          routedDefinitions.delete(name)
+        }
+      }
 
       // Route every delegation target to the user-chosen model.
       for (const name of targets) {
         const def = ensureAgent(name)
-        const model = opts.agentModels?.[name] ?? opts.subagentModel
-        if (!def.model) def.model = model
+        const override = opts.agentModels[name]
+        const wasRouted = routedModels.has(name)
+        if (!def.model || wasRouted) {
+          const model = override ? modelReference(override, `agentModels.${name}`) : activeSubagentModel
+          def.model = model.raw
+          routedModels.set(name, override ? model : undefined)
+          routedDefinitions.set(name, def)
+        }
       }
 
       // Configure the orchestrator: model, hard tool block, and the
       // delegation directive as its system prompt.
       const orchestrator = ensureAgent(opts.orchestratorAgent)
-      orchestrator.mode ??= "primary"
+      orchestrator.mode = "primary"
+      orchestrator.description ??= "Plans, delegates, and reviews work performed by subagents."
       if (opts.orchestratorModel) orchestrator.model = opts.orchestratorModel
-      if (opts.blockedTools.length > 0) {
-        const permission = { ...orchestrator.permission }
-        for (const tool of opts.blockedTools) permission[tool] = "deny"
-        orchestrator.permission = permission
-      }
+      const permission = { ...orchestrator.permission }
+      for (const tool of ORCHESTRATOR_TOOLS) permission[tool] = "allow"
+      for (const tool of opts.blockedTools) permission[tool] = "deny"
+      orchestrator.permission = permission
       if (!orchestrator.prompt?.includes(DIRECTIVE_MARKER)) {
         orchestrator.prompt = orchestrator.prompt
           ? `${orchestrator.prompt}\n\n${orchestratorDirective(opts)}`
           : orchestratorDirective(opts)
+      }
+
+      // Keep the built-in build agent available for hands-on work. The
+      // dedicated orchestrator is the default only when the user has not
+      // explicitly selected a different primary agent.
+      const configWithDefaultAgent = cfg as typeof cfg & ConfigWithDefaultAgent
+      configWithDefaultAgent.default_agent ??= opts.orchestratorAgent
+
+      const command = (cfg.command ??= {})
+      const existingCommand = command[MODEL_COMMAND]
+      if (existingCommand && existingCommand.template !== MODEL_COMMAND_TEMPLATE) {
+        throw new Error(`[${PLUGIN_ID}] The \`/${MODEL_COMMAND}\` command is already defined.`)
+      }
+      command[MODEL_COMMAND] ??= {
+        template: MODEL_COMMAND_TEMPLATE,
+        description: "Change the model used by delegated subagents",
+        agent: opts.orchestratorAgent,
+        subtask: false,
       }
 
       await client.app.log({
@@ -246,10 +314,43 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           extra: {
             routedAgents: targets,
             orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
+            orchestratorTools: [...ORCHESTRATOR_TOOLS],
             blockedTools: [...opts.blockedTools],
           },
         },
       })
+    },
+    "command.execute.before": async (input, output) => {
+      if (input.command !== MODEL_COMMAND) return
+
+      activeSubagentModel = modelReference(input.arguments, `/${MODEL_COMMAND} argument`)
+      for (const [name, override] of routedModels) {
+        if (override) continue
+        const def = routedDefinitions.get(name)
+        if (def) def.model = activeSubagentModel.raw
+      }
+
+      for (const part of output.parts) {
+        if (part.type === "text") {
+          part.text = `The delegated subagent model is now \`${activeSubagentModel.raw}\` for this running opencode process. Confirm this change in one sentence and do nothing else.`
+        }
+      }
+
+      await client.app.log({
+        body: {
+          service: PLUGIN_ID,
+          level: "info",
+          message: `Subagent model changed from chat -> ${activeSubagentModel.raw}`,
+        },
+      })
+    },
+    "chat.message": async (input, output) => {
+      const agentName = input.agent ?? output.message.agent
+      const route = routedModels.get(agentName)
+      if (!routedModels.has(agentName)) return
+
+      const model = route ?? activeSubagentModel
+      output.message.model = { providerID: model.providerID, modelID: model.modelID }
     },
   }
 }
