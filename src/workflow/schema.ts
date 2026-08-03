@@ -36,6 +36,7 @@ import type {
   WorkflowSpecV1,
 } from "./types.ts"
 import { STEP_TYPES, WORKFLOW_VERSION, WorkflowValidationError } from "./types.ts"
+import { compileJsonSchema } from "./json-schema.ts"
 export { WorkflowValidationError } from "./types.ts"
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_-]*$/
@@ -562,14 +563,25 @@ const checkOutputSchema = (raw: Record<string, unknown>, path: string): JsonSche
   const value = raw.outputSchema
   if (value === undefined) return undefined
   if (!isPlainObject(value)) fail(`${path}.outputSchema`, "must be a plain object")
-  if (value.type !== undefined && typeof value.type === "string") {
-    if (!JSON_SCHEMA_TYPES.has(value.type)) {
-      fail(`${path}.outputSchema.type`, `unknown JSON Schema type "${value.type}"`)
-    }
-  } else if (value.type !== undefined) {
+  if (value.type === undefined) {
+    fail(`${path}.outputSchema.type`, "is required; outputSchema must be a complete JSON Schema")
+  }
+  if (typeof value.type !== "string") {
     fail(`${path}.outputSchema.type`, "must be a string")
   }
-  return copyJson(value as JsonSchema)
+  if (!JSON_SCHEMA_TYPES.has(value.type)) {
+    fail(`${path}.outputSchema.type`, `unknown JSON Schema type "${value.type}"`)
+  }
+  const schema = copyJson(value as JsonSchema)
+  try {
+    compileJsonSchema(schema)
+  } catch (error) {
+    fail(
+      `${path}.outputSchema`,
+      error instanceof Error ? error.message : "must be a valid JSON Schema",
+    )
+  }
+  return schema
 }
 
 const checkAgentMetadata = (

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Rejected incomplete or malformed `outputSchema` objects during workflow validation and documented the exact start-source and limit contracts in model-facing guidance.
+- Enforced structured workflow results through final-response JSON plus local JSON Schema validation, avoiding OpenCode 1.18 message decoding failures and forced tool choice on incompatible thinking models.
+- Retried transient child-message reads while asynchronous prompt status is still being registered, preserving the real provider error when startup races occur.
+- Clarified that `workflow_start` is intentionally unavailable during background completion/failure notification turns and is restored by the next explicit user message.
+
 ## 0.3.0 - 2026-08-03
 
 ### Added

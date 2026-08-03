@@ -116,7 +116,7 @@ results, usage, sessions, and node state are persisted
 final result returns to the parent session
 ```
 
-The scheduler, not the model, owns concurrency, retries, limits, cancellation, and resume. Child prompts use OpenCode's asynchronous session API with the exact selected agent, model, and variant. Completion is accepted only after the correlated assistant message is finished; status polling handles OpenCode versions where the newer wait endpoint is unavailable. Intermediate results remain in result files and child sessions, so the parent receives the final result instead of every transcript.
+The scheduler, not the model, owns concurrency, retries, limits, cancellation, and resume. Child prompts use OpenCode's asynchronous session API with the exact selected agent, model, and variant. For `outputSchema` steps, the plugin requests JSON in the final response and validates it locally; it does not rely on provider-native structured-output tool choice, so thinking models such as DeepSeek remain compatible. Completion is accepted only after the correlated assistant message is finished; status polling handles OpenCode versions where the newer wait endpoint is unavailable. Intermediate results remain in result files and child sessions, so the parent receives the final result instead of every transcript.
 
 ### Workflow Tools
 
@@ -199,6 +199,8 @@ Supported operations:
 - `loop`: repeat a body under a hard iteration bound.
 
 Prompts interpolate restricted references such as `{{ input.issue }}`, `{{ discover.files }}`, and `{{ item }}`. Conditions support `$ref`, `$eq`, `$ne`, `$lt`, `$lte`, `$gt`, `$gte`, `$and`, `$or`, and `$not`.
+
+Every `outputSchema` must be a complete JSON Schema object with a top-level string `type`; shorthand maps such as `{ "profile": "object" }` are rejected before the run is created. Supported top-level limits are `maxParallel`, `maxAgents`, `maxIterations`, `maxTokens`, `maxCost`, and `deadline`. Fields such as `maxSteps` and `maxDurationMin` are not part of Workflow IR v1.
 
 See [docs/workflow-schema.md](docs/workflow-schema.md) for the complete contract.
 

@@ -133,7 +133,7 @@ export const OrchestratorPlugin: Plugin = async (pluginInput, options = {}) => {
       }
       if (opts.workflows.enabled) {
         command.workflow ??= {
-          template: "Design a validated dynamic workflow for `$ARGUMENTS`, then call `workflow_start` with the v1 workflow specification. Return the run id and keep the user informed.",
+          template: "Design a validated dynamic workflow for `$ARGUMENTS`, then call `workflow_start` with spec only. Never also pass name; name is only for loading a saved workflow. Return the run id and keep the user informed.",
           description: "Start a durable dynamic workflow",
           agent: opts.orchestratorAgent,
           subtask: false,

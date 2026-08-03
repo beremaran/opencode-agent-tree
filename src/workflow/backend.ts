@@ -15,9 +15,13 @@
  *     endpoint (falling back to `session.status` polling when the endpoint is
  *     absent or not implemented). Completion is never inferred from partial
  *     assistant text.
+ *     Structured results are requested in the final response and validated
+ *     locally instead of using OpenCode's provider-native output format. This
+ *     avoids forcing tool choice on incompatible thinking models and avoids
+ *     OpenCode 1.18's persisted-format message decoding failure.
  *  3. The completed assistant message that answers the admitted prompt is read
- *     back, its structured output (when present) or final text is returned
- *     together with the exact cost, token usage, session id, and files.
+ *     back, its validated structured output (when requested) or final text is
+ *     returned together with the exact cost, token usage, session id, and files.
  *
  * Provider and structured-output failures carried on the completed message are
  * rethrown as typed errors. Timeouts and caller-supplied abort signals cancel
@@ -66,10 +70,13 @@ import type {
   WorktreeRemoveInput,
 } from "@opencode-ai/sdk/v2"
 import type { JsonSchema } from "./types.ts"
+import { explainJsonSchemaMismatch } from "./json-schema.ts"
 
 /** Default poll interval for the `session.status` idle fallback. */
 const DEFAULT_POLL_INTERVAL_MS = 250
 const DEFAULT_RESULT_WAIT_MS = 10_000
+
+const STRUCTURED_OUTPUT_PREAMBLE = `Complete the task normally, including any tool use. When the task is complete, your final assistant response must contain exactly one JSON value matching the JSON Schema below. Do not wrap the JSON in Markdown or add commentary before or after it.`
 
 /** Token usage reported for a completed assistant message. */
 export interface TokenUsage {
@@ -405,6 +412,43 @@ const describeError = (value: unknown): string => {
   }
 }
 
+const requestStructuredOutput = (prompt: string, schema: JsonSchema): string =>
+  `${prompt}\n\n<workflow-output-contract>\n${STRUCTURED_OUTPUT_PREAMBLE}\nJSON Schema:\n${JSON.stringify(schema, null, 2)}\n</workflow-output-contract>`
+
+const parseJsonResponse = (text: string): unknown => {
+  const trimmed = text.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i)
+  const candidate = fenced?.[1]?.trim() ?? trimmed
+  if (candidate === "") {
+    throw new StructuredOutputError("agent returned an empty final response; expected JSON")
+  }
+  try {
+    return JSON.parse(candidate)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new StructuredOutputError(`agent final response was not valid JSON: ${detail}`)
+  }
+}
+
+const validateStructuredOutput = (
+  schema: JsonSchema,
+  text: string,
+  nativeValue: unknown,
+): unknown => {
+  const value = nativeValue === undefined ? parseJsonResponse(text) : nativeValue
+  let mismatch: string | undefined
+  try {
+    mismatch = explainJsonSchemaMismatch(schema, value)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new SessionBackendError(`invalid structured output schema: ${detail}`, { cause: error })
+  }
+  if (mismatch !== undefined) {
+    throw new StructuredOutputError(`agent JSON did not match outputSchema: ${mismatch}`)
+  }
+  return value
+}
+
 const isUnavailableEndpoint = (error: unknown): boolean =>
   /not available yet|not implemented|unsupported/i.test(describeError(error))
 
@@ -699,18 +743,26 @@ export class OpenCodeSessionBackend implements SessionBackend {
     this.running.add(sessionID)
     try {
       const directory = this.sessionDirs.get(sessionID) ?? this.options.directory
-      const needsBaseline = this.promptedSessions.has(sessionID) && (format !== undefined || !this.client.v2?.session?.prompt)
+      const usesLegacyPrompt =
+        (this.sessionExecution.has(sessionID) && this.client.session.promptAsync !== undefined) ||
+        !this.client.v2?.session?.prompt
+      const needsBaseline = this.promptedSessions.has(sessionID) && usesLegacyPrompt
       const priorMessageIDs = needsBaseline
         ? new Set((await this.readMessages(sessionID, directory, controller.signal)).map((message) => message.id))
         : undefined
       this.promptedSessions.add(sessionID)
-      const admission = await this.promptAsync(sessionID, prompt, format, directory, controller.signal)
+      const admittedPrompt = format === undefined ? prompt : requestStructuredOutput(prompt, format)
+      const admission = await this.promptAsync(sessionID, admittedPrompt, directory, controller.signal)
       admission.priorMessageIDs = priorMessageIDs
-       await this.waitForIdle(sessionID, directory, admission, controller.signal)
+      await this.waitForIdle(sessionID, directory, admission, controller.signal)
       const turn = await this.readCompletedTurn(sessionID, directory, admission, controller.signal)
       const assistant = turn.assistant
       this.throwIfFailed(assistant)
-      return this.buildResult(sessionID, { user: turn.user, assistant })
+      const result = this.buildResult(sessionID, { user: turn.user, assistant })
+      if (format !== undefined) {
+        result.structured = validateStructuredOutput(format, result.text, result.structured)
+      }
+      return result
     } catch (error) {
       if (controller.signal.aborted) {
         await this.cancel(sessionID).catch(() => {})
@@ -845,12 +897,11 @@ export class OpenCodeSessionBackend implements SessionBackend {
   private async promptAsync(
     sessionID: string,
     text: string,
-    format: JsonSchema | undefined,
     directory: string,
     signal: AbortSignal,
   ): Promise<AdmissionInfo> {
     const execution = this.sessionExecution.get(sessionID)
-    const legacyPrompt = async (outputFormat?: OutputFormat) => {
+    const legacyPrompt = async () => {
       if (!this.client.session.promptAsync) {
         throw new SessionBackendError(
           "OpenCode client exposes no session.promptAsync endpoint",
@@ -865,20 +916,11 @@ export class OpenCodeSessionBackend implements SessionBackend {
             model: execution?.model,
             variant: execution?.variant,
             parts: [{ type: "text", text }],
-            format: outputFormat,
           }))
         },
         signal,
       )
       return { transport: "async" } as AdmissionInfo
-    }
-    if (format !== undefined) {
-      if (!this.client.session.promptAsync) {
-        throw new SessionBackendError(
-          "structured output requested but the OpenCode client exposes no session.promptAsync (which accepts a format)",
-        )
-      }
-      return legacyPrompt({ type: "json_schema", schema: format })
     }
     // OpenCode 1.18's queued v2 prompt does not carry child agent/model
     // selection. For sessions created here, use promptAsync so execution uses
@@ -921,6 +963,9 @@ export class OpenCodeSessionBackend implements SessionBackend {
       }
     }
     let observedRunning = false
+    const startupDeadline = Date.now() + this.options.resultWaitMs
+    let firstMissingStatus = true
+    let lastReadError: unknown
     for (;;) {
       if (signal.aborted) throw reasonOf(signal)
       const statuses = await abortable(
@@ -937,8 +982,25 @@ export class OpenCodeSessionBackend implements SessionBackend {
       } else if (observedRunning) {
         return
       } else {
-        const turn = this.correlate(await this.readMessages(sessionID, directory, signal), admission)
-        if (turn.assistant?.completed !== undefined) return
+        // promptAsync returns before OpenCode necessarily registers the child
+        // as busy. Give status one poll to catch up, then use messages as the
+        // terminal signal. Projection/decoding failures during this startup
+        // window are transient and retried for the same bounded grace period.
+        if (firstMissingStatus) {
+          firstMissingStatus = false
+        } else {
+          try {
+            const turn = this.correlate(await this.readMessages(sessionID, directory, signal), admission)
+            if (turn.assistant?.completed !== undefined) return
+            lastReadError = undefined
+          } catch (error) {
+            lastReadError = error
+          }
+        }
+        if (Date.now() >= startupDeadline) {
+          if (lastReadError !== undefined) throw lastReadError
+          return
+        }
       }
       await sleep(this.options.pollIntervalMs, signal)
     }
@@ -976,16 +1038,23 @@ export class OpenCodeSessionBackend implements SessionBackend {
     signal: AbortSignal,
   ): Promise<{ user?: BackendMessage; assistant: BackendMessage }> {
     const deadline = Date.now() + this.options.resultWaitMs
+    let lastReadError: unknown
     for (;;) {
-      const messages = await this.readMessages(sessionID, directory, signal)
-      const turn = this.correlate(messages, admission)
-      if (
-        turn.assistant?.completed !== undefined &&
-        !admission.priorMessageIDs?.has(turn.assistant.id)
-      ) {
-        return { user: turn.user, assistant: turn.assistant }
+      try {
+        const messages = await this.readMessages(sessionID, directory, signal)
+        const turn = this.correlate(messages, admission)
+        if (
+          turn.assistant?.completed !== undefined &&
+          !admission.priorMessageIDs?.has(turn.assistant.id)
+        ) {
+          return { user: turn.user, assistant: turn.assistant }
+        }
+        lastReadError = undefined
+      } catch (error) {
+        lastReadError = error
       }
       if (Date.now() >= deadline) {
+        if (lastReadError !== undefined) throw lastReadError
         throw new SessionBackendError(
           `no completed assistant message found for session "${sessionID}" after prompt`,
         )

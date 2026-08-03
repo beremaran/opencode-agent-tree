@@ -35,6 +35,8 @@ Plugin configuration provides hard policy ceilings. A specification may lower th
 
 `maxAgents` counts every child session, including retry attempts and worktree integration workers. `maxTokens` counts input, output, and reasoning tokens reported by completed sessions.
 
+These six names are the complete top-level limit contract. `maxSteps` and `maxDurationMin` are not supported.
+
 ## Common Step Fields
 
 ```ts
@@ -85,6 +87,12 @@ type SynthesizeStep = StepBase & {
 ```
 
 `input` contains explicit prior-result references. Prompt references are also tracked as dependencies.
+
+## Structured Outputs
+
+`outputSchema` must be a complete, valid JSON Schema object with a top-level string `type`. A shorthand field map such as `{ "profile": "object" }` is not a schema and is rejected during workflow validation.
+
+The plugin appends the schema as a final-response contract, parses the completed response as JSON, and validates the value locally. It deliberately does not use OpenCode's provider-native `json_schema` output mode, which keeps structured workflow steps compatible with thinking models that reject forced tool choice. A non-JSON response or schema mismatch raises a structured-output error and participates in the step's normal `retry` policy.
 
 ## Sequence And Parallel
 

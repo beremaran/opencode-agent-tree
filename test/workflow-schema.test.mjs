@@ -547,9 +547,19 @@ test("validates synthesize input references and metadata", () => {
 test("validates outputSchema structurally", () => {
   expectError(() => validateWorkflowSpec({ ...baseSpec(), steps: [{ ...baseSpec().steps[0], outputSchema: "nope" }] }), /\$\.steps\[0\]\.outputSchema/, /plain object/)
   expectError(
+    () => validateWorkflowSpec({ ...baseSpec(), steps: [{ ...baseSpec().steps[0], outputSchema: { profile: "object" } }] }),
+    /\$\.steps\[0\]\.outputSchema\.type/,
+    /is required/,
+  )
+  expectError(
     () => validateWorkflowSpec({ ...baseSpec(), steps: [{ ...baseSpec().steps[0], outputSchema: { type: "frobnicate" } }] }),
     /\$\.steps\[0\]\.outputSchema\.type/,
     /unknown JSON Schema type "frobnicate"/,
+  )
+  expectError(
+    () => validateWorkflowSpec({ ...baseSpec(), steps: [{ ...baseSpec().steps[0], outputSchema: { type: "object", properties: "nope" } }] }),
+    /\$\.steps\[0\]\.outputSchema/,
+    /invalid JSON Schema/,
   )
   const ok = validateWorkflowSpec({ ...baseSpec(), steps: [{ ...baseSpec().steps[0], outputSchema: { type: "array", items: { type: "string" } } }] })
   assert.equal(ok.byId.gather.outputSchema.type, "array")

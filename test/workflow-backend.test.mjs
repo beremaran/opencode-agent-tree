@@ -27,27 +27,30 @@ const userMessage = (overrides = {}) => ({
   ],
 })
 
-const assistantMessage = (overrides = {}) => ({
-  info: {
-    id: "assist-1",
-    sessionID: SESSION_ID,
-    role: "assistant",
-    time: { created: 200, completed: 260 },
-    parentID: "user-1",
-    agent: "worker",
-    modelID: "claude",
-    providerID: "anthropic",
-    path: { cwd: "/base", root: "/base" },
-    cost: 0.42,
-    tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
-    finish: "done",
-    structured: undefined,
-    ...overrides,
-  },
-  parts: [
-    { id: "p-assist", sessionID: SESSION_ID, messageID: "assist-1", type: "text", text: "Done." },
-  ],
-})
+const assistantMessage = (overrides = {}) => {
+  const { parts, ...infoOverrides } = overrides
+  return {
+    info: {
+      id: "assist-1",
+      sessionID: SESSION_ID,
+      role: "assistant",
+      time: { created: 200, completed: 260 },
+      parentID: "user-1",
+      agent: "worker",
+      modelID: "claude",
+      providerID: "anthropic",
+      path: { cwd: "/base", root: "/base" },
+      cost: 0.42,
+      tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+      finish: "done",
+      structured: undefined,
+      ...infoOverrides,
+    },
+    parts: parts ?? [
+      { id: "p-assist", sessionID: SESSION_ID, messageID: "assist-1", type: "text", text: "Done." },
+    ],
+  }
+}
 
 const createClient = (overrides = {}) => {
   const calls = {
@@ -177,11 +180,18 @@ test("rejects createSession with a malformed model reference", async () => {
   )
 })
 
-test("returns structured output, exact usage, session id, and files for a formatted run", async () => {
+test("requests and locally validates structured output without provider-native format", async () => {
   const { client, calls } = createClient()
   client.session.messages = async (params) => {
     calls.messages.push(params)
-    return { data: [userMessage(), assistantMessage({ structured: { ok: true } })] }
+    return {
+      data: [
+        userMessage(),
+        assistantMessage({
+          parts: [{ id: "json", sessionID: SESSION_ID, messageID: "assist-1", type: "text", text: '{"ok":true}' }],
+        }),
+      ],
+    }
   }
   const backend = makeBackend(client)
 
@@ -193,35 +203,36 @@ test("returns structured output, exact usage, session id, and files for a format
 
   assert.equal(result.sessionID, SESSION_ID)
   assert.deepEqual(result.structured, { ok: true })
-  assert.equal(result.text, "Done.")
+  assert.equal(result.text, '{"ok":true}')
   assert.equal(result.cost, 0.42)
   assert.deepEqual(result.tokens, { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } })
   assert.deepEqual(result.files, ["src/a.ts"])
   assert.equal(result.finish, "done")
 
-  assert.equal(calls.promptAsync.length, 1)
-  assert.equal(calls.prompt.length, 0, "formatted runs must never call v2 session.prompt")
-  assert.deepEqual(calls.promptAsync[0].parts, [{ type: "text", text: "Summarize" }])
-  assert.deepEqual(calls.promptAsync[0].format, {
-    type: "json_schema",
-    schema: { type: "object", properties: { ok: { type: "boolean" } } },
-  })
-  assert.equal(calls.promptAsync[0].directory, "/base")
+  assert.equal(calls.promptAsync.length, 0)
+  assert.equal(calls.prompt.length, 1)
+  assert.match(calls.prompt[0].prompt.text, /^Summarize/)
+  assert.match(calls.prompt[0].prompt.text, /final assistant response must contain exactly one JSON value/)
+  assert.match(calls.prompt[0].prompt.text, /"ok"/)
+  assert.equal("format" in calls.prompt[0], false)
 })
 
-test("a formatted run requires session.promptAsync and rejects without it", async () => {
-  const { client } = createClient()
+test("a formatted run works through the v2 queue when session.promptAsync is unavailable", async () => {
+  const { client, calls } = createClient()
   client.session.promptAsync = undefined
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    return {
+      data: [userMessage(), assistantMessage({ parts: [{ type: "text", text: "```json\n{}\n```" }] })],
+    }
+  }
   const backend = makeBackend(client)
 
-  await assert.rejects(
-    () => backend.run({ sessionID: SESSION_ID, prompt: "Work", format: { type: "object" } }),
-    (error) => {
-      assert.ok(error instanceof SessionBackendError)
-      assert.match(error.message, /promptAsync/)
-      return true
-    },
-  )
+  const result = await backend.run({ sessionID: SESSION_ID, prompt: "Work", format: { type: "object" } })
+
+  assert.deepEqual(result.structured, {})
+  assert.equal(calls.prompt.length, 1)
+  assert.equal("format" in calls.prompt[0], false)
 })
 
 test("an unformatted run prefers the durable v2 queue and passes no format", async () => {
@@ -356,6 +367,121 @@ test("propagates structured-output errors from the completed message", async () 
       return true
     },
   )
+})
+
+test("reports invalid local JSON as a structured-output error", async () => {
+  const { client } = createClient()
+  const backend = makeBackend(client)
+
+  await assert.rejects(
+    () => backend.run({ sessionID: SESSION_ID, prompt: "Work", format: { type: "object" } }),
+    (error) => {
+      assert.ok(error instanceof StructuredOutputError)
+      assert.match(error.message, /not valid JSON/)
+      return true
+    },
+  )
+})
+
+test("reports local JSON Schema mismatches with the failing value path", async () => {
+  const { client, calls } = createClient()
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    return {
+      data: [
+        userMessage(),
+        assistantMessage({ parts: [{ type: "text", text: '{"ok":"yes"}' }] }),
+      ],
+    }
+  }
+  const backend = makeBackend(client)
+
+  await assert.rejects(
+    () => backend.run({
+      sessionID: SESSION_ID,
+      prompt: "Work",
+      format: {
+        type: "object",
+        properties: { ok: { type: "boolean" } },
+        required: ["ok"],
+      },
+    }),
+    (error) => {
+      assert.ok(error instanceof StructuredOutputError)
+      assert.match(error.message, /did not match outputSchema/)
+      assert.match(error.message, /\$\/ok/)
+      return true
+    },
+  )
+})
+
+test("a formatted created child preserves model selection without native tool choice", async () => {
+  const { client, calls } = createClient()
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    return {
+      data: [userMessage(), assistantMessage({ parts: [{ type: "text", text: '{"ok":true}' }] })],
+    }
+  }
+  const backend = makeBackend(client)
+  await backend.createSession({
+    parentID: "parent-1",
+    agent: "worker",
+    model: "opencode-go/deepseek-v4-flash",
+    variant: "high",
+  })
+
+  const result = await backend.run({
+    sessionID: SESSION_ID,
+    prompt: "Work",
+    format: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+  })
+
+  assert.deepEqual(result.structured, { ok: true })
+  assert.equal(calls.promptAsync.length, 1)
+  assert.equal(calls.promptAsync[0].format, undefined)
+  assert.deepEqual(calls.promptAsync[0].model, {
+    providerID: "opencode-go",
+    modelID: "deepseek-v4-flash",
+  })
+  assert.match(calls.promptAsync[0].parts[0].text, /workflow-output-contract/)
+})
+
+test("retries a transient message read while promptAsync status is not registered", async () => {
+  const { client, calls } = createClient()
+  delete client.v2.session.wait
+  client.session.status = async (params) => {
+    calls.status.push(params)
+    return { data: {} }
+  }
+  let reads = 0
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    reads += 1
+    if (reads === 1) {
+      throw new TypeError('Expected OutputFormatJsonSchema, got {"type":"json_schema"}')
+    }
+    return {
+      data: [
+        userMessage(),
+        assistantMessage({
+          error: { name: "APIError", data: { message: "real provider failure", isRetryable: false } },
+        }),
+      ],
+    }
+  }
+  const backend = makeBackend(client)
+  await backend.createSession({ parentID: "parent", agent: "worker" })
+
+  await assert.rejects(
+    () => backend.run({ sessionID: SESSION_ID, prompt: "Work" }),
+    (error) => {
+      assert.ok(error instanceof SessionRunError)
+      assert.match(error.message, /real provider failure/)
+      return true
+    },
+  )
+  assert.ok(reads >= 3)
 })
 
 test("propagates provider errors from the completed message", async () => {
@@ -528,7 +654,7 @@ test("tracks each session's actual directory for status, messages, and abort", a
   }
   client.session.messages = async (params) => {
     calls.messages.push(params)
-    return { data: [userMessage(), assistantMessage()] }
+    return { data: [userMessage(), assistantMessage({ parts: [{ type: "text", text: "{}" }] })] }
   }
   const backend = makeBackend(client)
 
@@ -543,6 +669,7 @@ test("tracks each session's actual directory for status, messages, and abort", a
   await backend.run({ sessionID: SESSION_ID, prompt: "Work", format: { type: "object" } })
 
   assert.equal(calls.promptAsync[0].directory, worktreeDir, "promptAsync uses the worktree dir")
+  assert.equal(calls.promptAsync[0].format, undefined, "structured output is enforced locally")
   assert.equal(calls.status[0].directory, worktreeDir, "status polling uses the worktree dir")
   assert.equal(calls.messages[0].directory, worktreeDir, "messages use the worktree dir")
 

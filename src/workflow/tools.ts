@@ -34,7 +34,7 @@ const objectSchema = tool.schema.record(tool.schema.string(), tool.schema.unknow
 
 const pretty = (value: unknown): string => JSON.stringify(value, null, 2)
 
-const AUTHORING_GUIDE = `The inline spec is strict JSON data, never JavaScript:
+const WORKFLOW_AUTHORING_GUIDE = `The inline spec is strict JSON data, never JavaScript. workflow_start requires exactly one source: spec or name, never both:
 {version:1,name?,description?,limits?,phases?,steps:[...]}. Root steps run in sequence.
 Every step has a globally unique id, a type, optional label/phase/dependsOn.
 - agent: {id,type:"agent",agent,prompt,model?,variant?,outputSchema?,retry?,timeout?,isolation?}
@@ -45,11 +45,12 @@ Every step has a globally unique id, a type, optional label/phase/dependsOn.
 - loop: {id,type:"loop",over?,as?,until?,maxIterations?,steps:[...]}
 Prompts interpolate only safe references such as {{ input.issue }}, {{ discover.files }}, or a map variable like {{ item }}.
 Conditions are closed objects: {$ref:"x"}, {$eq:[{$ref:"x"},value]}, $ne/$lt/$lte/$gt/$gte, {$and:[...]}, {$or:[...]}, {$not:{...}}.
-Use outputSchema whenever later steps consume a result. Set isolation:true for editing agents that need a worktree; changed worktrees are serially integrated before completion. Keep limits explicit and bounded.`
+outputSchema must be a complete JSON Schema object with a required type (for example {type:"object",properties:{answer:{type:"string"}},required:["answer"],additionalProperties:false}); shorthand field maps are invalid. The plugin requests JSON in the final response and validates it locally, so this works with models that do not support provider-native structured output.
+Supported top-level limits are maxParallel, maxAgents, maxIterations, maxTokens, maxCost, and deadline (ISO 8601). maxSteps and maxDurationMin are not supported. Set isolation:true for editing agents that need a worktree; changed worktrees are serially integrated before completion. Keep limits explicit and bounded.`
 
 export const createWorkflowTools = (options: WorkflowToolOptions) => ({
   workflow_start: tool({
-    description: `Start a validated, durable multi-agent workflow. Provide either an inline v1 workflow spec or a saved workflow name. Returns immediately unless wait is true.\n\n${AUTHORING_GUIDE}`,
+    description: `Start a validated, durable multi-agent workflow. Provide either an inline v1 workflow spec or a saved workflow name. Returns immediately unless wait is true.\n\n${WORKFLOW_AUTHORING_GUIDE}`,
     args: {
       spec: objectSchema.optional(),
       name: tool.schema.string().min(1).optional(),
@@ -148,7 +149,7 @@ export const createWorkflowTools = (options: WorkflowToolOptions) => ({
     },
   }),
   workflow_save: tool({
-    description: "Validate and save a reusable workflow definition at project or personal scope.",
+    description: `Validate and save a reusable workflow definition at project or personal scope.\n\n${WORKFLOW_AUTHORING_GUIDE}`,
     args: {
       name: tool.schema.string().min(1),
       spec: objectSchema,

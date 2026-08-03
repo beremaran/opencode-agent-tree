@@ -107,6 +107,18 @@ test("workflow_start requires exactly one source", async () => {
   await assert.rejects(() => f.tools.workflow_start.execute({ spec, name: "demo" }, f.context), /exactly one/)
 })
 
+test("workflow tool guidance documents strict schemas, supported limits, and exclusive sources", () => {
+  const f = fixture()
+  for (const name of ["workflow_start", "workflow_save"]) {
+    const description = f.tools[name].description
+    assert.match(description, /exactly one source: spec or name/)
+    assert.match(description, /complete JSON Schema object with a required type/)
+    assert.match(description, /maxParallel, maxAgents, maxIterations, maxTokens, maxCost, and deadline/)
+    assert.match(description, /maxSteps and maxDurationMin are not supported/)
+    assert.match(description, /validates it locally/)
+  }
+})
+
 test("management tools delegate status, result, cancel, and resume", async () => {
   const f = fixture("never")
   await f.tools.workflow_status.execute({}, f.context)

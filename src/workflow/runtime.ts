@@ -125,8 +125,8 @@ export const createWorkflowServicesFactory = (factory: WorkflowRuntimeFactoryOpt
           const rawContext = await store.loadContext(event.runId)
           if (!isRecord(rawContext) || typeof rawContext.parentSessionID !== "string" || rawContext.notifyParent === false) return
           const text = event.type === "run.completed"
-            ? `[workflow-complete:${event.runId}] The background workflow completed. Call workflow_result with this run id, review the result, and report it to the user. Do not start another workflow for this notification.`
-            : `[workflow-failed:${event.runId}] The background workflow failed: ${event.error}. Call workflow_status with this run id and report the failure. Do not start another workflow for this notification.`
+            ? `[workflow-complete:${event.runId}] The background workflow completed. Call workflow_result with this run id, review the result, and report it to the user. workflow_start is intentionally disabled for this notification turn. Do not attempt to start or restart a workflow; a later explicit user message re-enables it.`
+            : `[workflow-failed:${event.runId}] The background workflow failed: ${event.error}. Call workflow_status with this run id and report the failure. workflow_start is intentionally disabled for this notification turn. Do not attempt to start or restart a workflow; a later explicit user message re-enables it.`
           const parentModel = promptModel(
             typeof rawContext.parentModel === "string"
               ? rawContext.parentModel
