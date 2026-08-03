@@ -45,10 +45,10 @@ test("routes only eligible agents and preserves explicit models", async () => {
   assert.equal(config.agent.existing.model, "explicit/model")
   assert.equal(config.agent.primary.model, undefined)
   assert.equal(config.agent.disabled.model, undefined)
-  assert.equal(config.agent.build.model, "override/model")
-  assert.match(config.agent.build.prompt, /Keep reports concise\./)
-  assert.equal(config.agent.build.permission.edit, "deny")
-  assert.equal(config.agent.build.permission.bash, "deny")
+  assert.equal(config.agent.Manager.model, "override/model")
+  assert.match(config.agent.Manager.prompt, /Keep reports concise\./)
+  assert.equal(config.agent.Manager.permission.edit, "deny")
+  assert.equal(config.agent.Manager.permission.bash, "deny")
 })
 
 test("explicit agent selection is filtered, deduplicated, and accurately logged", async () => {
@@ -92,7 +92,7 @@ test("invalid options fail with a useful error instead of a runtime TypeError", 
     { subagentModel: "provider/model", blockedTools: undefined },
     { agent: {} },
   )
-  assert.deepEqual(defaults.config.agent.build.permission, { edit: "deny", bash: "deny" })
+  assert.deepEqual(defaults.config.agent.Manager.permission, { edit: "deny", bash: "deny" })
 
   for (const options of [
     { subagentModel: "provider/model", blockedTools: null },
@@ -117,48 +117,48 @@ test("disabled orchestrator agent rejects and logs an error", async () => {
   const hooks = await OrchestratorPlugin(input, { subagentModel: "provider/model" })
 
   await assert.rejects(
-    () => hooks.config({ agent: { build: { mode: "primary", disable: true } } }),
+    () => hooks.config({ agent: { Manager: { mode: "primary", disable: true } } }),
     /disabled/,
   )
   const errorLogs = logs.filter((entry) => entry.body.level === "error")
   assert.equal(errorLogs.length, 1)
-  assert.match(errorLogs[0].body.message, /orchestrator agent `build` is disabled/)
+  assert.match(errorLogs[0].body.message, /orchestrator agent `Manager` is disabled/)
 })
 
 test("directive is appended to an existing orchestrator prompt", async () => {
   const { config } = await apply(
     { subagentModel: "provider/model" },
-    { agent: { build: { mode: "primary", prompt: "Existing prompt text." } } },
+    { agent: { Manager: { mode: "primary", prompt: "Existing prompt text." } } },
   )
 
-  assert.ok(config.agent.build.prompt.startsWith("Existing prompt text."))
-  assert.equal((config.agent.build.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.ok(config.agent.Manager.prompt.startsWith("Existing prompt text."))
+  assert.equal((config.agent.Manager.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
 })
 
 test("orchestrator permissions merge with a clobber warning", async () => {
   const { config, logs } = await apply(
     { subagentModel: "provider/model" },
-    { agent: { build: { mode: "primary", permission: { bash: "ask", webfetch: "allow" } } } },
+    { agent: { Manager: { mode: "primary", permission: { bash: "ask", webfetch: "allow" } } } },
   )
 
-  assert.deepEqual(config.agent.build.permission, { bash: "deny", webfetch: "allow", edit: "deny" })
+  assert.deepEqual(config.agent.Manager.permission, { bash: "deny", webfetch: "allow", edit: "deny" })
   const bashWarnings = logs.filter(
     (entry) => entry.body.level === "warn" && entry.body.message.includes("bash"),
   )
   assert.equal(bashWarnings.length, 1)
-  assert.match(bashWarnings[0].body.message, /Overwriting existing permission for tool "bash" on agent "build"/)
+  assert.match(bashWarnings[0].body.message, /Overwriting existing permission for tool "bash" on agent "Manager"/)
 })
 
 test("re-running the config hook is idempotent and does not repeat warnings", async () => {
   const { config, hooks, logs } = await apply(
     { subagentModel: "fallback/model" },
-    { agent: { build: { mode: "primary", permission: { bash: "ask" } }, worker: { mode: "subagent" } } },
+    { agent: { Manager: { mode: "primary", permission: { bash: "ask" } }, worker: { mode: "subagent" } } },
   )
 
   await hooks.config(config)
 
   assert.equal(config.agent.worker.model, "fallback/model")
-  assert.equal((config.agent.build.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal((config.agent.Manager.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
   const bashWarnings = logs.filter(
     (entry) => entry.body.level === "warn" && entry.body.message.includes("bash"),
   )
@@ -183,6 +183,46 @@ test("custom orchestrator is routed to primary mode with default blocked tools",
 
   assert.equal(config.agent.lead.mode, "primary")
   assert.deepEqual(config.agent.lead.permission, { edit: "deny", bash: "deny" })
+})
+
+test("default config creates a Manager orchestrator agent with the directive and blocks", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model" },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.Manager.mode, "primary")
+  assert.deepEqual(config.agent.Manager.permission, { edit: "deny", bash: "deny" })
+  assert.equal((config.agent.Manager.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal(config.agent.Manager.tools, undefined)
+  assert.equal(config.agent.Manager.disable, undefined)
+})
+
+test("built-in agents are left untouched when absent from the input config", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model" },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.build, undefined)
+  assert.equal(config.agent.plan, undefined)
+  assert.equal(config.agent.Manager.mode, "primary")
+})
+
+test("creating the Manager agent is logged once and not repeated on re-run", async () => {
+  const { config, hooks, logs } = await apply(
+    { subagentModel: "provider/model" },
+    { agent: {} },
+  )
+
+  const creations = () =>
+    logs.filter(
+      (entry) => entry.body.level === "info" && entry.body.message.includes('Creating orchestrator agent "Manager"'),
+    )
+
+  assert.equal(creations().length, 1)
+  await hooks.config(config)
+  assert.equal(creations().length, 1)
 })
 
 test("malformed model ids are rejected and logged as errors", async () => {
@@ -216,7 +256,7 @@ test("blocking a directive tool warns but still applies the deny", async () => {
   const directiveWarnings = logs.filter((entry) => entry.body.level === "warn")
   assert.equal(directiveWarnings.length, 1)
   assert.match(directiveWarnings[0].body.message, /Orchestrator relies on blocked tool\(s\): task/)
-  assert.equal(config.agent.build.permission.task, "deny")
+  assert.equal(config.agent.Manager.permission.task, "deny")
 })
 
 test("explicit agents omitting built-ins log a warning", async () => {

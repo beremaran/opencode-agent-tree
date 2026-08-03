@@ -21,17 +21,18 @@ e.g.:
 
 Expected behavior:
 
-1. The orchestrator (`build`) does **not** edit the file itself.
+1. The orchestrator agent (`Manager`, created by the plugin) does **not** edit
+   the file itself.
 2. It delegates the work to a subagent via the `task` tool — in opencode the
    work appears as a delegated task from the orchestrator, not as direct work
-   by the `build` agent.
+   by the `Manager` agent.
 3. The subagent runs with the model configured in `subagentModel`
    (check `opencode run --print-logs` for the `stream` lines).
 
 Verify the startup log line is present:
 
 ```
-Orchestrator "build" enabled; subagents -> <subagentModel>
+Orchestrator "Manager" enabled; subagents -> <subagentModel>
 ```
 
 ## Pull requests

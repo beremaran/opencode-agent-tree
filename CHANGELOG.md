@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-04
+
+### Changed
+
+- The default orchestrator agent is now `Manager`, created by the plugin when it does not exist; built-in agents (`build`, `plan`) are no longer modified by default.
+- When the orchestrator agent does not exist, startup logs `Creating orchestrator agent "Manager"` (idempotent across config-hook re-runs).
+
+### Notes
+
+- Migration: installs that previously converted `build` keep the `# Orchestrator Mode` directive on `build`. Use the new `Manager` agent, or clean up `build`'s prompt manually in your opencode config.
+
 ## 0.4.1 - 2026-08-04
 
 ### Fixed

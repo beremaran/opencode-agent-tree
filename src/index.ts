@@ -20,7 +20,8 @@ export interface OrchestratorOptions {
   orchestratorModel?: string
 
   /**
-   * Name of the orchestrator agent. Default: "build".
+   * Name of the orchestrator agent. Default: "Manager". If no agent with this
+   * name exists, the plugin creates one (visible in the agent picker).
    */
   orchestratorAgent?: string
 
@@ -69,7 +70,7 @@ type NormalizedOptions = {
 }
 
 const DEFAULTS = {
-  orchestratorAgent: "build",
+  orchestratorAgent: "Manager",
   blockedTools: ["edit", "bash"],
 } as const
 
@@ -287,7 +288,17 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
 
         // Configure the orchestrator: model, hard tool block, and the
         // delegation directive as its system prompt.
+        const orchestratorExisted = hasAgent(opts.orchestratorAgent) && getAgent(opts.orchestratorAgent) != null
         const orchestrator = ensureAgent(opts.orchestratorAgent)
+        if (!orchestratorExisted) {
+          await client.app.log({
+            body: {
+              service: PLUGIN_ID,
+              level: "info",
+              message: `Creating orchestrator agent "${opts.orchestratorAgent}"`,
+            },
+          })
+        }
         orchestrator.mode ??= "primary"
         if (opts.orchestratorModel) orchestrator.model = opts.orchestratorModel
         if (opts.blockedTools.length > 0) {

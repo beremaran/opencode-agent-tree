@@ -87,7 +87,7 @@ From npm:
 | ------------------- | -------------------- | -------------------------------- | ----------- |
 | `subagentModel`     | `string`             | **required**                     | Model for all delegated work, e.g. `"anthropic/claude-sonnet-4-6"`. Must be `provider/model` format. Agents with an explicit `model` in `opencode.json` are never overridden. See [Model precedence](#model-precedence). |
 | `orchestratorModel` | `string`             | agent model, else `model`        | Model for the orchestrator itself. Unconditionally overrides an explicit model on the orchestrator agent. |
-| `orchestratorAgent` | `string`             | `"build"`                        | Which agent acts as the orchestrator. |
+| `orchestratorAgent` | `string`             | `"Manager"`                      | Which agent acts as the orchestrator. Created by the plugin if it does not exist (it shows up in the agent picker under this name). Built-in agents are left untouched by default; if you name an existing agent, the plugin converts it instead. |
 | `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. Disabled agents, primary-mode agents, and the orchestrator itself are filtered out even if listed. |
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. Never applies to the orchestrator agent (it is never routed). |
 | `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
@@ -119,6 +119,7 @@ The orchestrator is asymmetric:
       {
         "subagentModel": "anthropic/claude-sonnet-4-6",
         "orchestratorModel": "anthropic/claude-opus-4-5",
+        "orchestratorAgent": "Manager",
         "agents": ["general", "explore", "worker"],
         "agentModels": { "explore": "anthropic/claude-haiku-4-5" },
         "instructions": "Never delegate more than 3 subtasks at once."
@@ -179,8 +180,8 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 - **Restart after config changes.** Options are read at startup; edit
   `opencode.json` and restart opencode to apply them.
 - **Check the startup log line.** A healthy load logs
-  `Orchestrator "build" enabled; subagents -> <subagentModel>`.
-- **`The orchestrator agent "X" is disabled`** is a config error: the agent
+  `Orchestrator "Manager" enabled; subagents -> <subagentModel>`.
+- **`The orchestrator agent "Manager" is disabled`** is a config error: the agent
   named by `orchestratorAgent` has `disable: true`. Enable it or choose another
   orchestrator.
 - **A warning you did not expect** — the four warning cases above log at
@@ -199,6 +200,15 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 - The directive is appended only once: the `# Orchestrator Mode` marker in the
   prompt prevents re-appending if the config hook re-runs or opencode reloads
   the plugin. This is deliberate.
+- By default the orchestrator agent is **created by the plugin** as `Manager`
+  (visible in the agent picker under that name); no built-in agent is touched.
+  If you set `orchestratorAgent` to an existing agent (e.g. `build`), the plugin
+  converts that agent into the orchestrator instead.
+- **Migrating from <=0.4.x:** older versions converted the built-in `build`
+  agent by default. That conversion is not undone on upgrade — `build` keeps the
+  `# Orchestrator Mode` directive in its prompt because the marker only prevents
+  re-appending, never removes. Either switch to the new `Manager` agent, or
+  remove the directive from `build`'s prompt manually in your opencode config.
 
 ## Development
 
@@ -210,7 +220,7 @@ npm run check
 The plugin is a single `config` hook (`src/index.ts`): it mutates the merged opencode config at startup — routing subagent models, denying the orchestrator's hands-on tools, and installing the directive prompt. To verify against a live opencode, run from this repo (its `opencode.json` is pre-wired) and watch for the startup log line:
 
 ```
-Orchestrator "build" enabled; subagents -> <subagentModel>
+Orchestrator "Manager" enabled; subagents -> <subagentModel>
 ```
 
 ## Publishing
