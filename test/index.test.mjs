@@ -22,19 +22,16 @@ test("routes only eligible agents and preserves explicit models", async () => {
   const { config, logs } = await apply(
     {
       subagentModel: "fallback/model",
-      subagentEffort: "high",
       orchestratorModel: "override/model",
       instructions: "Keep reports concise.",
       agentModels: { worker: "special/model" },
-      agentEfforts: { explore: "low", worker: "medium" },
     },
     {
       model: "orchestrator/model",
       agent: {
-        build: { mode: "primary", model: "existing/model", permission: { edit: "allow" } },
-        plan: { mode: "primary", model: "plan/model", prompt: "Plan only." },
+        build: { mode: "primary", model: "existing/model" },
         worker: { mode: "subagent" },
-        existing: { mode: "all", model: "explicit/model", variant: "custom" },
+        existing: { mode: "all", model: "explicit/model" },
         primary: { mode: "primary" },
         disabled: { mode: "subagent", disable: true },
       },
@@ -46,56 +43,21 @@ test("routes only eligible agents and preserves explicit models", async () => {
   assert.equal(config.agent.explore.model, "fallback/model")
   assert.equal(config.agent.worker.model, "special/model")
   assert.equal(config.agent.existing.model, "explicit/model")
-  assert.equal(config.agent.general.variant, "high")
-  assert.equal(config.agent.explore.variant, "low")
-  assert.equal(config.agent.worker.variant, "medium")
-  assert.equal(config.agent.existing.variant, "custom")
   assert.equal(config.agent.primary.model, undefined)
   assert.equal(config.agent.disabled.model, undefined)
-  assert.deepEqual(config.agent.build, {
-    mode: "primary",
-    model: "existing/model",
-    permission: { edit: "allow" },
-  })
-  assert.deepEqual(config.agent.plan, { mode: "primary", model: "plan/model", prompt: "Plan only." })
-  assert.equal(config.agent.worker.mode, "subagent")
-  assert.match(config.agent.worker.prompt, /# Worker Mode/)
-  assert.equal(config.default_agent, "orchestrator")
-  assert.equal(config.agent.orchestrator.model, "override/model")
-  assert.match(config.agent.orchestrator.prompt, /Keep reports concise\./)
-  assert.equal(config.agent.orchestrator.permission.edit, "deny")
-  assert.equal(config.agent.orchestrator.permission.write, "deny")
-  assert.equal(config.agent.orchestrator.permission.apply_patch, "deny")
-  assert.equal(config.agent.orchestrator.permission.bash, "deny")
-  assert.equal(config.agent.orchestrator.permission.task, "allow")
-  assert.equal(config.agent.orchestrator.permission.todowrite, "allow")
-  assert.equal(config.agent.orchestrator.permission.question, "allow")
-  assert.deepEqual(logs.at(-1).body.extra.orchestratorTools, [
-    "task",
-    "todowrite",
-    "question",
-    "workflow_start",
-    "workflow_status",
-    "workflow_result",
-    "workflow_cancel",
-    "workflow_resume",
-    "workflow_save",
-    "workflow_list_saved",
-  ])
-  assert.equal(config.command["subagent-model"].agent, "orchestrator")
-  assert.match(config.command.workflow.template, /workflow_start.*wait: true/)
-  assert.match(config.command.workflow.template, /Never also pass name/)
-  assert.match(config.command.workflow.template, /one-shot `opencode run`/)
+  assert.equal(config.agent.build.model, "override/model")
+  assert.match(config.agent.build.prompt, /Keep reports concise\./)
+  assert.equal(config.agent.build.permission.edit, "deny")
+  assert.equal(config.agent.build.permission.bash, "deny")
 })
 
 test("explicit agent selection is filtered, deduplicated, and accurately logged", async () => {
   const { config, logs } = await apply(
     {
       subagentModel: "fallback/model",
-      agents: ["worker", "worker", "primary", "disabled", "general", "build", "orchestrator"],
+      agents: ["worker", "worker", "primary", "disabled", "general", "build"],
     },
     {
-      default_agent: "build",
       agent: {
         build: { mode: "primary" },
         worker: { mode: "subagent" },
@@ -109,7 +71,6 @@ test("explicit agent selection is filtered, deduplicated, and accurately logged"
   assert.equal(config.agent.worker.model, "fallback/model")
   assert.equal(config.agent.general.model, "fallback/model")
   assert.equal(config.agent.explore, undefined)
-  assert.equal(config.default_agent, "build")
 })
 
 test("configuration is idempotent and custom orchestrators are primary agents", async () => {
@@ -121,130 +82,26 @@ test("configuration is idempotent and custom orchestrators are primary agents", 
   await hooks.config(config)
 
   assert.equal(config.agent.lead.mode, "primary")
-  assert.equal(config.default_agent, "lead")
-  assert.equal(config.agent.worker.mode, "subagent")
-  assert.equal(config.agent.worker.model, "fallback/model")
-  assert.match(config.agent.worker.prompt, /# Worker Mode/)
-  assert.deepEqual(config.agent.lead.permission, {
-    task: "allow",
-    todowrite: "allow",
-    question: "allow",
-    workflow_start: "allow",
-    workflow_status: "allow",
-    workflow_result: "allow",
-    workflow_cancel: "allow",
-    workflow_resume: "allow",
-    workflow_save: "allow",
-    workflow_list_saved: "allow",
-  })
+  assert.equal(config.agent.lead.permission, undefined)
   assert.equal((config.agent.lead.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
-  assert.deepEqual(logs.at(-1).body.extra.routedAgents, ["general", "explore", "worker", "helper"])
+  assert.deepEqual(logs.at(-1).body.extra.routedAgents, ["general", "explore", "helper"])
 })
 
 test("invalid options fail with a useful error instead of a runtime TypeError", async () => {
   const defaults = await apply(
-    { subagentModel: "fallback/model", blockedTools: undefined },
+    { subagentModel: "model", blockedTools: undefined },
     { agent: {} },
   )
-  assert.deepEqual(defaults.config.agent.orchestrator.permission, {
-    task: "allow",
-    todowrite: "allow",
-    question: "allow",
-    workflow_start: "allow",
-    workflow_status: "allow",
-    workflow_result: "allow",
-    workflow_cancel: "allow",
-    workflow_resume: "allow",
-    workflow_save: "allow",
-    workflow_list_saved: "allow",
-    edit: "deny",
-    write: "deny",
-    apply_patch: "deny",
-    bash: "deny",
-  })
+  assert.deepEqual(defaults.config.agent.build.permission, { edit: "deny", bash: "deny" })
 
   for (const options of [
-    { subagentModel: "fallback/model", blockedTools: null },
-    { subagentModel: "fallback/model", agents: null },
-    { subagentModel: "fallback/model", agents: "general" },
+    { subagentModel: "model", blockedTools: null },
+    { subagentModel: "model", agents: null },
+    { subagentModel: "model", agents: "general" },
   ]) {
     const { input, logs } = createInput()
     await assert.rejects(() => OrchestratorPlugin(input, options), /blockedTools|agents/)
     assert.equal(logs.at(-1).body.level, "error")
-  }
-
-  for (const options of [
-    { subagentModel: "fallback/model", subagentEffort: 3 },
-    { subagentModel: "fallback/model", agentEfforts: null },
-    { subagentModel: "fallback/model", agentEfforts: { explore: "" } },
-  ]) {
-    const { input, logs } = createInput()
-    await assert.rejects(() => OrchestratorPlugin(input, options), /subagentEffort|agentEfforts/)
-    assert.equal(logs.at(-1).body.level, "error")
-  }
-})
-
-test("workflows can be disabled without exposing tools, commands, or prompt guidance", async () => {
-  const { config, hooks, logs } = await apply(
-    { subagentModel: "fallback/model", workflows: false },
-    { agent: {} },
-  )
-
-  assert.deepEqual(Object.keys(hooks.tool), [])
-  assert.equal(config.command.workflow, undefined)
-  assert.equal(config.command.workflows, undefined)
-  assert.equal(config.agent.orchestrator.permission.workflow_start, undefined)
-  assert.doesNotMatch(config.agent.orchestrator.prompt, /workflow_start/)
-  assert.deepEqual(logs.at(-1).body.extra.orchestratorTools, ["task", "todowrite", "question"])
-})
-
-test("validates and logs workflow runtime options", async () => {
-  const { config, logs } = await apply(
-    {
-      subagentModel: "fallback/model",
-      workflows: {
-        approval: "never",
-        maxParallel: 2,
-        maxAgents: 12,
-        maxIterations: 7,
-        stepTimeout: 60,
-        maxTokens: 1000,
-        maxCost: 2.5,
-        autoResume: true,
-        notifyParent: false,
-      },
-    },
-    { agent: {} },
-  )
-
-  assert.equal(config.command.workflow.agent, "orchestrator")
-  assert.deepEqual(logs.at(-1).body.extra.workflows, {
-    enabled: true,
-    approval: "never",
-    maxParallel: 2,
-    maxAgents: 12,
-    maxIterations: 7,
-    stepTimeout: 60,
-    maxTokens: 1000,
-    maxCost: 2.5,
-    autoResume: true,
-    notifyParent: false,
-  })
-
-  for (const workflows of [
-    null,
-    { approval: "sometimes" },
-    { maxParallel: 0 },
-    { maxAgents: 1.5 },
-    { maxIterations: -1 },
-    { stepTimeout: 0 },
-    { maxTokens: 0 },
-    { maxCost: -1 },
-    { autoResume: "yes" },
-    { unknown: true },
-  ]) {
-    const { input } = createInput()
-    await assert.rejects(() => OrchestratorPlugin(input, { subagentModel: "fallback/model", workflows }), /workflows/)
   }
 })
 
@@ -253,93 +110,4 @@ test("missing subagentModel is reported as configuration error", async () => {
 
   await assert.rejects(() => OrchestratorPlugin(input, {}), /subagentModel.*required/)
   assert.match(logs.at(-1).body.message, /subagentModel.*required/)
-})
-
-test("chat command changes only fallback-routed subagent models", async () => {
-  const { config, hooks, logs } = await apply(
-    {
-      subagentModel: "fallback/one",
-      agentModels: { explore: "special/explore" },
-    },
-    {
-      agent: {
-        worker: { mode: "subagent" },
-        explicit: { mode: "subagent", model: "user/model" },
-      },
-    },
-  )
-
-  const parts = [{ type: "text", text: "original command template" }]
-  await hooks["command.execute.before"](
-    { command: "subagent-model", sessionID: "session", arguments: " openrouter/anthropic/claude-sonnet " },
-    { parts },
-  )
-
-  assert.equal(config.agent.general.model, "openrouter/anthropic/claude-sonnet")
-  assert.equal(config.agent.worker.model, "openrouter/anthropic/claude-sonnet")
-  assert.equal(config.agent.explore.model, "special/explore")
-  assert.equal(config.agent.explicit.model, "user/model")
-  assert.match(parts[0].text, /openrouter\/anthropic\/claude-sonnet/)
-  assert.match(logs.at(-1).body.message, /Changed the default subagent model/)
-
-  const fallbackMessage = { agent: "general", model: { providerID: "old", modelID: "model" } }
-  await hooks["chat.message"]({ sessionID: "child", agent: "general" }, { message: fallbackMessage, parts: [] })
-  assert.deepEqual(fallbackMessage.model, {
-    providerID: "openrouter",
-    modelID: "anthropic/claude-sonnet",
-  })
-
-  const overrideMessage = { agent: "explore", model: { providerID: "old", modelID: "model" } }
-  await hooks["chat.message"]({ sessionID: "child", agent: "explore" }, { message: overrideMessage, parts: [] })
-  assert.deepEqual(overrideMessage.model, { providerID: "special", modelID: "explore" })
-
-  const explicitMessage = { agent: "explicit", model: { providerID: "user", modelID: "model" } }
-  await hooks["chat.message"]({ sessionID: "child", agent: "explicit" }, { message: explicitMessage, parts: [] })
-  assert.deepEqual(explicitMessage.model, { providerID: "user", modelID: "model" })
-})
-
-test("chat model command and model options reject invalid references", async () => {
-  const { hooks } = await apply({ subagentModel: "fallback/model" }, { agent: {} })
-
-  await assert.rejects(
-    () =>
-      hooks["command.execute.before"](
-        { command: "subagent-model", sessionID: "session", arguments: "missing-provider" },
-        { parts: [] },
-      ),
-    /provider\/model-id/,
-  )
-
-  const { input } = createInput()
-  await assert.rejects(() => OrchestratorPlugin(input, { subagentModel: "missing-provider" }), /provider\/model-id/)
-})
-
-test("workflow completion notifications cannot recursively start workflows", async () => {
-  const { hooks } = await apply({ subagentModel: "fallback/model" }, { agent: {} })
-  const message = {
-    agent: "orchestrator",
-    model: { providerID: "provider", modelID: "model", variant: "high" },
-    tools: { workflow_start: true, workflow_result: true },
-  }
-  await hooks["chat.message"](
-    { sessionID: "parent", agent: "orchestrator" },
-    {
-      message,
-      parts: [{ type: "text", text: "[workflow-complete:abc] Inspect the result." }],
-    },
-  )
-  assert.equal(message.tools.workflow_start, false)
-  assert.equal(message.tools.workflow_result, true)
-  assert.equal(message.model.variant, "high")
-})
-
-test("does not silently replace a user-defined subagent-model command", async () => {
-  await assert.rejects(
-    () =>
-      apply(
-        { subagentModel: "fallback/model" },
-        { command: { "subagent-model": { template: "User command" } }, agent: {} },
-      ),
-    /already defined/,
-  )
 })

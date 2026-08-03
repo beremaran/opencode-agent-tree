@@ -1,29 +1,184 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
-import {
-  BUILTIN_SUBAGENTS,
-  MODEL_COMMAND,
-  MODEL_COMMAND_TEMPLATE,
-  ORCHESTRATOR_TOOLS,
-  PLUGIN_ID,
-  WORKER_AGENT,
-} from "./constants.ts"
-import { createRoutingState } from "./model-routing.ts"
-import { configureOrchestrator, configureWorker } from "./orchestrator.ts"
-import { modelReference, normalizeOptions } from "./options.ts"
-import type { AgentLike, ConfigWithDefaultAgent, NormalizedOptions } from "./types.ts"
-import { createWorkflowServicesFactory } from "./workflow/runtime.ts"
-import { createWorkflowTools } from "./workflow/tools.ts"
-import type { WorkflowServices } from "./workflow/tools.ts"
+const PLUGIN_ID = "@beremaran/opencode-agent-tree"
+const DIRECTIVE_MARKER = "# Orchestrator Mode"
 
-export type { OrchestratorOptions } from "./types.ts"
+export interface OrchestratorOptions {
+  /**
+   * Model used for ALL delegated work — every subagent spawned via the
+   * `task` tool. Format: "provider/model-id" (e.g. "anthropic/claude-sonnet-4-6").
+   *
+   * Required. Agents that already declare an explicit `model` in
+   * opencode.json are never overridden.
+   */
+  subagentModel: string
+
+  /**
+   * Model for the orchestrator agent itself. Defaults to the agent's
+   * existing model, falling back to the top-level `model` setting.
+   */
+  orchestratorModel?: string
+
+  /**
+   * Name of the orchestrator agent. Default: "build".
+   */
+  orchestratorAgent?: string
+
+  /**
+   * Restrict which agents get routed to `subagentModel`. Defaults to every
+   * built-in subagent (general, explore) plus all subagent/all-mode agents
+   * already declared by the user. The orchestrator agent is never routed.
+   */
+  agents?: string[]
+
+  /**
+   * Per-agent model overrides, keyed by agent name. Wins over
+   * `subagentModel`.
+   */
+  agentModels?: Record<string, string>
+
+  /**
+   * Extra rules appended verbatim to the orchestrator's system prompt.
+   */
+  instructions?: string
+
+  /**
+   * Tools hard-blocked for the orchestrator via its agent `permission`
+   * config. Default: ["edit", "bash"]. Pass `[]` for prompt-only
+   * enforcement.
+   */
+  blockedTools?: string[]
+}
+
+type AgentLike = {
+  model?: string
+  mode?: string
+  disable?: boolean
+  prompt?: string
+  permission?: Record<string, unknown>
+}
+
+type NormalizedOptions = {
+  subagentModel: string
+  orchestratorModel?: string
+  orchestratorAgent: string
+  agents?: string[]
+  agentModels: Record<string, string>
+  instructions?: string
+  blockedTools: string[]
+}
+
+const DEFAULTS = {
+  orchestratorAgent: "build",
+  blockedTools: ["edit", "bash"],
+} as const
+
+/**
+ * Built-in agents are not present in the merged config when the plugin
+ * `config` hook runs, so the target entries must be created explicitly.
+ * Entries created here are merged over the built-ins at agent lookup time.
+ */
+const BUILTIN_SUBAGENTS = ["general", "explore"]
 
 const isSubagentLike = (agent: AgentLike | undefined) =>
   !agent || agent.mode === undefined || agent.mode === "subagent" || agent.mode === "all"
 
-export const OrchestratorPlugin: Plugin = async (pluginInput, options = {}) => {
-  const { client } = pluginInput
-  const sessionExecutions = new Map<string, { agent: string; model?: string; variant?: string }>()
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const invalidOption = (name: string, expected: string): never => {
+  throw new Error(`[${PLUGIN_ID}] The \`${name}\` option must be ${expected}.`)
+}
+
+const nonEmptyString = (value: unknown, name: string): string => {
+  if (typeof value !== "string") invalidOption(name, "a non-empty string")
+  const trimmed = (value as string).trim()
+  if (trimmed === "") invalidOption(name, "a non-empty string")
+  return trimmed
+}
+
+const optionalString = (value: unknown, name: string): string | undefined => {
+  if (value === undefined || value === "") return undefined
+  return nonEmptyString(value, name)
+}
+
+const stringArray = (value: unknown, name: string): string[] => {
+  if (!Array.isArray(value)) invalidOption(name, "an array of non-empty strings")
+  const entries = value as unknown[]
+  return [...new Set(entries.map((entry: unknown) => nonEmptyString(entry, `${name} entries`)))]
+}
+
+const stringRecord = (value: unknown, name: string): Record<string, string> => {
+  if (!isRecord(value)) invalidOption(name, "an object with non-empty string values")
+  const record = value as Record<string, unknown>
+
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [
+      nonEmptyString(key, `${name} keys`),
+      nonEmptyString(entry, `${name} values`),
+    ]),
+  )
+}
+
+const REQUIRED_MODEL_MESSAGE =
+  `[${PLUGIN_ID}] The \`subagentModel\` option is required, e.g. ["${PLUGIN_ID}", { "subagentModel": "anthropic/claude-sonnet-4-6" }]`
+
+const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
+  const candidate = rawOptions == null ? {} : rawOptions
+  if (!isRecord(candidate)) invalidOption("options", "an object")
+  const options = candidate as Record<string, unknown>
+
+  if (options.subagentModel === undefined || options.subagentModel === "") {
+    throw new Error(REQUIRED_MODEL_MESSAGE)
+  }
+
+  const blockedTools =
+    options.blockedTools === undefined ? [...DEFAULTS.blockedTools] : stringArray(options.blockedTools, "blockedTools")
+  const agents = options.agents === undefined ? undefined : stringArray(options.agents, "agents")
+
+  return {
+    subagentModel: nonEmptyString(options.subagentModel, "subagentModel"),
+    orchestratorModel: optionalString(options.orchestratorModel, "orchestratorModel"),
+    orchestratorAgent:
+      options.orchestratorAgent === undefined
+        ? DEFAULTS.orchestratorAgent
+        : nonEmptyString(options.orchestratorAgent, "orchestratorAgent"),
+    agents,
+    agentModels: options.agentModels === undefined ? {} : stringRecord(options.agentModels, "agentModels"),
+    instructions: optionalString(options.instructions, "instructions"),
+    blockedTools,
+  }
+}
+
+const orchestratorDirective = (opts: NormalizedOptions) => {
+  const blocked = opts.blockedTools.length > 0 ? opts.blockedTools.join(", ") : "none"
+  const extra = opts.instructions ? `\n\n${opts.instructions}` : ""
+  return `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
+
+You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, delegate, and review.
+
+## Non-negotiable rules
+1. Treat every user request as a project: break it into discrete, independently verifiable subtasks before touching anything.
+2. Delegate EVERY subtask with the \`task\` tool to a subagent. Never perform implementation work yourself.
+3. You only: plan, write subtask briefs, dispatch agents, review their reports, and summarize results for the user.
+4. Dispatch independent subtasks in parallel (multiple \`task\` calls in a single message). Never run dependent subtasks concurrently — wait for each result before dispatching the next.
+5. Give each subagent a complete, self-contained brief: goal, constraints, files involved, verification steps, and exactly what to report back.
+6. Review every subagent report. If work is incomplete or wrong, delegate the fix to a subagent — never fix it yourself.
+7. Reuse a running subagent via its task_id when follow-up work belongs to the same context.
+8. Keep the user informed: report what was delegated to whom, the results, blockers, and the final state.
+
+## Tool discipline
+- \`task\` for all work (mandatory), \`todowrite\` to track subtasks, \`question\` only to clarify genuinely ambiguous requests.
+- \`read\`/\`glob\`/\`grep\`/\`webfetch\`/\`websearch\` only when needed to write a better brief or verify a result.
+- Hands-on tools are hard-blocked for you (${blocked}). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
+
+## Default delegation
+- \`explore\` — codebase research, locating code, understanding existing implementations.
+- \`general\` — implementation, refactoring, testing, and any task without a more specific subagent.
+- Prefer the most specialized subagent for each subtask; fall back to \`general\`.${extra}`
+}
+
+export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
   let opts: NormalizedOptions
   try {
     opts = normalizeOptions(options)
@@ -33,41 +188,7 @@ export const OrchestratorPlugin: Plugin = async (pluginInput, options = {}) => {
     throw error
   }
 
-  const routing = createRoutingState(modelReference(opts.subagentModel, "subagentModel"))
-  const workflowAgents = [...BUILTIN_SUBAGENTS, WORKER_AGENT]
-  const workflowModels = [opts.subagentModel, ...Object.values(opts.agentModels)]
-  const runtimeFactory = createWorkflowServicesFactory({
-    input: pluginInput,
-    options: opts.workflows,
-    policy: () => ({ agents: workflowAgents, models: workflowModels }),
-    defaultAgent: () => WORKER_AGENT,
-    defaultModel: () => routing.getActiveModel().raw,
-    defaultVariant: () => opts.subagentEffort,
-    log: async (level, message, extra) => {
-      await client.app.log({ body: { service: PLUGIN_ID, level, message, extra } })
-    },
-  })
-  let servicesPromise: Promise<WorkflowServices> | undefined
-  const services = () => {
-    servicesPromise ??= runtimeFactory().catch((error) => {
-      servicesPromise = undefined
-      throw error
-    })
-    return servicesPromise
-  }
-  const workflowTools = createWorkflowTools({
-    services,
-    defaultModel: () => routing.getActiveModel().raw,
-    parentExecution: (sessionID) => sessionExecutions.get(sessionID),
-    approval: opts.workflows.approval,
-    limits: () => opts.workflows,
-  })
-
   return {
-    dispose: async () => {
-      if (servicesPromise) await (await servicesPromise).scheduler.dispose()
-    },
-    tool: opts.workflows.enabled ? workflowTools : {},
     config: async (cfg) => {
       const agent = (cfg.agent ??= {}) as Record<string, AgentLike>
       const hasAgent = (name: string) => Object.prototype.hasOwnProperty.call(agent, name)
@@ -91,119 +212,43 @@ export const OrchestratorPlugin: Plugin = async (pluginInput, options = {}) => {
         throw new Error(`[${PLUGIN_ID}] The orchestrator agent \`${opts.orchestratorAgent}\` is disabled.`)
       }
 
-      const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, WORKER_AGENT, ...Object.keys(agent)]
+      const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, ...Object.keys(agent)]
       const targets = [...new Set(candidates)].filter((name) => inScope(name, getAgent(name)))
-      const targetSet = new Set(targets)
-      workflowAgents.splice(0, workflowAgents.length, ...targets)
-
-      routing.prune(targetSet)
 
       // Route every delegation target to the user-chosen model.
       for (const name of targets) {
         const def = ensureAgent(name)
-        if (name === WORKER_AGENT) configureWorker(def)
-        routing.applyModel(name, def, opts.agentModels[name])
-        routing.applyEffort(name, def, opts.agentEfforts[name] ?? opts.subagentEffort)
+        const model = opts.agentModels?.[name] ?? opts.subagentModel
+        if (!def.model) def.model = model
       }
-      const configuredModels = [...new Set([
-        routing.getActiveModel().raw,
-        ...targets.map((name) => getAgent(name)?.model).filter((model): model is string => Boolean(model)),
-      ])]
-      workflowModels.splice(0, workflowModels.length, ...configuredModels)
 
       // Configure the orchestrator: model, hard tool block, and the
       // delegation directive as its system prompt.
-      const orchestrator = configureOrchestrator(ensureAgent(opts.orchestratorAgent), opts)
-
-      // Keep the built-in build agent available for hands-on work. The
-      // dedicated orchestrator is the default only when the user has not
-      // explicitly selected a different primary agent.
-      const configWithDefaultAgent = cfg as typeof cfg & ConfigWithDefaultAgent
-      configWithDefaultAgent.default_agent ??= opts.orchestratorAgent
-
-      const command = (cfg.command ??= {})
-      const existingCommand = command[MODEL_COMMAND]
-      if (existingCommand && existingCommand.template !== MODEL_COMMAND_TEMPLATE) {
-        throw new Error(`[${PLUGIN_ID}] The \`/${MODEL_COMMAND}\` command is already defined.`)
+      const orchestrator = ensureAgent(opts.orchestratorAgent)
+      orchestrator.mode ??= "primary"
+      if (opts.orchestratorModel) orchestrator.model = opts.orchestratorModel
+      if (opts.blockedTools.length > 0) {
+        const permission = { ...orchestrator.permission }
+        for (const tool of opts.blockedTools) permission[tool] = "deny"
+        orchestrator.permission = permission
       }
-      command[MODEL_COMMAND] ??= {
-        template: MODEL_COMMAND_TEMPLATE,
-        description: "Change the default model for delegated subagents",
-        agent: opts.orchestratorAgent,
-        subtask: false,
-      }
-      if (opts.workflows.enabled) {
-        command.workflow ??= {
-          template: "Design a validated dynamic workflow for `$ARGUMENTS`, then call `workflow_start` with spec and `wait: true`. Never also pass name; name is only for loading a saved workflow. Review and report the completed result. Foreground waiting keeps one-shot `opencode run` processes alive until the workflow finishes.",
-          description: "Start a durable dynamic workflow",
-          agent: opts.orchestratorAgent,
-          subtask: false,
-        }
-        command.workflows ??= {
-          template: "Call `workflow_status` without a run id and summarize the current and recent workflow runs.",
-          description: "List dynamic workflow runs",
-          agent: opts.orchestratorAgent,
-          subtask: false,
-        }
-        command["workflow-resume"] ??= {
-          template: "Call `workflow_resume` with run id `$ARGUMENTS`, then report whether it resumed.",
-          description: "Resume a dynamic workflow run",
-          agent: opts.orchestratorAgent,
-          subtask: false,
-        }
+      if (!orchestrator.prompt?.includes(DIRECTIVE_MARKER)) {
+        orchestrator.prompt = orchestrator.prompt
+          ? `${orchestrator.prompt}\n\n${orchestratorDirective(opts)}`
+          : orchestratorDirective(opts)
       }
 
       await client.app.log({
         body: {
           service: PLUGIN_ID,
           level: "info",
-          message: `Enabled orchestrator "${opts.orchestratorAgent}" with default subagent model "${opts.subagentModel}".`,
+          message: `Orchestrator "${opts.orchestratorAgent}" enabled; subagents -> ${opts.subagentModel}`,
           extra: {
             routedAgents: targets,
             orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
-            subagentEffort: opts.subagentEffort ?? "(model default)",
-            agentEfforts: { ...opts.agentEfforts },
-            orchestratorTools: ORCHESTRATOR_TOOLS.filter((tool) => opts.workflows.enabled || !tool.startsWith("workflow_")),
             blockedTools: [...opts.blockedTools],
-            workflows: opts.workflows,
           },
         },
-      })
-    },
-    "command.execute.before": async (input, output) => {
-      if (input.command !== MODEL_COMMAND) return
-
-      const model = routing.setActiveModel(modelReference(input.arguments, `/${MODEL_COMMAND} argument`))
-      if (!workflowModels.includes(model.raw)) workflowModels.push(model.raw)
-
-      for (const part of output.parts) {
-        if (part.type === "text") {
-          part.text = `Use \`${model.raw}\` as the default model for subsequent delegated tasks in this opencode process. Confirm the active subagent model in one sentence and do nothing else.`
-        }
-      }
-
-      await client.app.log({
-        body: {
-          service: PLUGIN_ID,
-          level: "info",
-          message: `Changed the default subagent model to "${model.raw}" for this opencode process.`,
-        },
-      })
-    },
-    "chat.message": async (input, output) => {
-      const notification = output.parts.some(
-        (part) => part.type === "text" && /^\[workflow-(complete|failed):/.test(part.text),
-      )
-      if (notification) output.message.tools = { ...output.message.tools, workflow_start: false }
-      const agentName = input.agent ?? output.message.agent
-      if (routing.hasRoute(agentName)) {
-        const model = routing.routeFor(agentName) ?? routing.getActiveModel()
-        output.message.model = { ...output.message.model, providerID: model.providerID, modelID: model.modelID }
-      }
-      sessionExecutions.set(input.sessionID, {
-        agent: agentName,
-        model: `${output.message.model.providerID}/${output.message.model.modelID}`,
-        variant: input.variant,
       })
     },
   }

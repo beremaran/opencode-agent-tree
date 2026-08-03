@@ -1,26 +1,22 @@
 {
   "name": "@beremaran/opencode-agent-tree",
-  "version": "0.3.1",
+  "version": "0.1.0",
   "publishConfig": {
     "access": "public",
     "provenance": true
   },
-  "description": "Durable dynamic multi-agent workflows, delegation enforcement, model routing, resume, and workflow observability for opencode.",
+  "description": "Force opencode to act as an orchestrator: every task is decomposed and delegated to subagents, with user-configurable models per agent.",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./server": "./src/index.ts",
-    "./tui": "./src/tui.tsx"
+    ".": "./src/index.ts"
   },
   "files": [
-    "src",
-    "docs",
-    "CHANGELOG.md"
+    "src"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "test": "node --experimental-strip-types test/index.test.mjs",
     "check": "npm run typecheck && npm test"
   },
   "keywords": [
@@ -28,11 +24,9 @@
     "plugin",
     "orchestrator",
     "subagent",
-    "delegation",
-    "multi-agent",
-    "dynamic-workflows",
-    "workflow-engine",
-    "ai-agent"
+    "task",
+    "delegate",
+    "swarm"
   ],
   "author": "Berke Arslan <berke@beremaran.com>",
   "repository": {
@@ -40,34 +34,11 @@
     "url": "git+https://github.com/beremaran/opencode-agent-tree.git"
   },
   "license": "MIT",
-  "engines": {
-    "opencode": ">=1.18.11 <2"
-  },
-  "dependencies": {
-    "ajv": "^8.17.1"
-  },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.11 <2",
-    "@opencode-ai/sdk": ">=1.18.11 <2",
-    "@opentui/core": ">=0.4.5",
-    "@opentui/keymap": ">=0.4.5",
-    "@opentui/solid": ">=0.4.5",
-    "solid-js": "1.9.12"
-  },
-  "peerDependenciesMeta": {
-    "@opentui/core": { "optional": true },
-    "@opentui/keymap": { "optional": true },
-    "@opentui/solid": { "optional": true },
-    "solid-js": { "optional": true }
+    "@opencode-ai/plugin": "*"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.18.11",
-    "@opencode-ai/sdk": "1.18.11",
-    "@opentui/core": "^0.4.5",
-    "@opentui/keymap": "^0.4.5",
-    "@opentui/solid": "^0.4.5",
-    "solid-js": "1.9.12",
-    "@types/node": "^24.13.3",
     "typescript": "^5.6.0"
   }
 }
