@@ -58,6 +58,7 @@ const fixture = (approval = "always") => {
     defaultModel: () => "openai/gpt-5.6-luna",
     parentExecution: () => ({ agent: "orchestrator", model: "openai/gpt-5.6-luna", variant: "high" }),
     approval,
+    limits: () => ({ maxParallel: 3, maxAgents: 8, maxIterations: 5 }),
   })
   const approvals = []
   const metadata = []
@@ -79,6 +80,16 @@ test("workflow_start approves and starts an inline workflow in the background", 
   const result = await f.tools.workflow_start.execute({ spec, input: { issue: 42 } }, f.context)
   assert.equal(f.approvals.length, 1)
   assert.equal(f.approvals[0].permission, "workflow")
+  assert.deepEqual(f.approvals[0].metadata.agents, ["worker"])
+  assert.deepEqual(f.approvals[0].metadata.effectiveLimits, {
+    maxParallel: 3,
+    maxAgents: 8,
+    maxIterations: 5,
+    maxTokens: undefined,
+    maxCost: undefined,
+    deadline: undefined,
+  })
+  assert.match(f.approvals[0].metadata.childPermissions, /--auto is not inherited/)
   const start = f.calls.find(([name]) => name === "start")[1]
   assert.equal(start.parentSessionID, "parent")
   assert.equal(start.parentAgent, "orchestrator")
@@ -116,6 +127,8 @@ test("workflow tool guidance documents strict schemas, supported limits, and exc
     assert.match(description, /maxParallel, maxAgents, maxIterations, maxTokens, maxCost, and deadline/)
     assert.match(description, /maxSteps and maxDurationMin are not supported/)
     assert.match(description, /validates it locally/)
+    assert.match(description, /input uses raw tokens such as \["audits"\]/)
+    assert.match(description, /Default allowed agents are general, explore, and worker/)
   }
 })
 

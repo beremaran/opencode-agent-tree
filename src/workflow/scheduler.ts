@@ -718,10 +718,12 @@ export class WorkflowScheduler {
         }
         handle = await this.backend.createSession(createInput)
         context.sessions.set(handle.sessionID, handle)
+        const runningNode = (await this.store.loadRun(context.runId))?.nodes[instanceKey]
         await this.store.updateRun(context.runId, {
           node: {
             instanceKey,
             node: {
+              ...runningNode,
               instanceKey,
               stepId: step.id,
               status: "running",
@@ -745,6 +747,9 @@ export class WorkflowScheduler {
         })
         const usage = usageFromResult(result, Date.now() - startedAt)
         addUsage(context.usage, usage)
+        const priorUsage = (await this.store.loadRun(context.runId))?.nodes[instanceKey]?.usage
+        const nodeUsage = { ...(priorUsage ?? {}) }
+        addUsage(nodeUsage, usage)
         const value = result.structured !== undefined ? result.structured : result.text
         await this.store.updateRun(context.runId, {
           usage,
@@ -760,7 +765,7 @@ export class WorkflowScheduler {
                 ? { directory: handle.worktree.directory, branch: handle.worktree.branch }
                 : undefined,
               attempts: attempt,
-              usage,
+              usage: nodeUsage,
               startedAt: nowIso(),
               finishedAt: nowIso(),
             },
@@ -785,21 +790,57 @@ export class WorkflowScheduler {
         }
         return value
       } catch (error) {
-        lastError = error
+        let failure = error
         if (handle) {
-          await this.store.updateRun(context.runId, {
-            session: { sessionId: handle.sessionID, agent, model, status: "failed", endedAt: nowIso() },
-          }).catch(() => undefined)
+          const partialResult = error instanceof SessionBackendError ? error.partialResult : undefined
+          if (partialResult !== undefined) {
+            const usage = usageFromResult(partialResult, Date.now() - startedAt)
+            addUsage(context.usage, usage)
+            const existingNode = (await this.store.loadRun(context.runId))?.nodes[instanceKey]
+            const nodeUsage = { ...(existingNode?.usage ?? {}) }
+            addUsage(nodeUsage, usage)
+            await this.store.updateRun(context.runId, {
+              usage,
+              node: {
+                instanceKey,
+                node: {
+                  ...existingNode,
+                  instanceKey,
+                  stepId: step.id,
+                  status: "running",
+                  usage: nodeUsage,
+                },
+              },
+              session: {
+                sessionId: handle.sessionID,
+                agent,
+                model,
+                status: "failed",
+                endedAt: nowIso(),
+                usage,
+              },
+            })
+            try {
+              this.enforceUsageLimits(context)
+            } catch (limitError) {
+              failure = limitError
+            }
+          } else {
+            await this.store.updateRun(context.runId, {
+              session: { sessionId: handle.sessionID, agent, model, status: "failed", endedAt: nowIso() },
+            }).catch(() => undefined)
+          }
         }
+        lastError = failure
         if (
           attempt > retries ||
           context.controller.signal.aborted ||
-          error instanceof SessionCancelledError ||
-          error instanceof SessionTimeoutError ||
-          (error instanceof SessionBackendError && error.constructor === SessionBackendError) ||
-          (error instanceof SessionRunError && NON_RETRYABLE_RUN_CODES.has(error.code)) ||
-          error instanceof WorkflowLimitError
-        ) throw error
+          failure instanceof SessionCancelledError ||
+          failure instanceof SessionTimeoutError ||
+          (failure instanceof SessionBackendError && failure.constructor === SessionBackendError) ||
+          (failure instanceof SessionRunError && NON_RETRYABLE_RUN_CODES.has(failure.code)) ||
+          failure instanceof WorkflowLimitError
+        ) throw failure
       } finally {
         if (handle && !retainForIntegration) {
           context.sessions.delete(handle.sessionID)

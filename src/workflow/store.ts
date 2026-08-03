@@ -428,10 +428,25 @@ const applyEvent = (record: RunRecord, event: RunEvent): RunRecord => {
         updatedAt: event.at,
         seq: event.seq,
       }
-    case "resume":
+    case "resume": {
+      const nodes = Object.fromEntries(Object.entries(record.nodes).map(([instanceKey, node]) => {
+        if (node.status === "completed" || node.status === "cached") return [instanceKey, node]
+        const {
+          error: _error,
+          sessionId: _sessionId,
+          worktree: _worktree,
+          outputRef: _outputRef,
+          cached: _cached,
+          startedAt: _startedAt,
+          finishedAt: _finishedAt,
+          ...pending
+        } = node
+        return [instanceKey, { ...pending, status: "pending" as const }]
+      }))
       return {
         ...record,
         status: "running",
+        nodes,
         startedAt: record.startedAt ?? event.at,
         finishedAt: undefined,
         resumeToken: event.fromRunId ?? record.resumeToken,
@@ -439,6 +454,7 @@ const applyEvent = (record: RunRecord, event: RunEvent): RunRecord => {
         updatedAt: event.at,
         seq: event.seq,
       }
+    }
     case "meta":
       return {
         ...record,

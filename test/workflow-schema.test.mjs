@@ -425,8 +425,6 @@ test("validates safe prompt templates", () => {
   const makeStep = (prompt) => ({ version: 1, steps: [{ id: "a", type: "agent", agent: "x", prompt }] })
   const badTemplates = [
     ["Use {{ gather.", "unterminated"],
-    ["Use {{ gather }} then }} more", "stray"],
-    ["Text }} early", "stray"],
     ["Use {{ }}.", "empty"],
     ["Use {{ {{ gather }} }}.", "nested"],
     ["Use {{ gather.output + 1 }}.", "invalid path segment"],
@@ -447,6 +445,9 @@ test("validates safe prompt templates", () => {
     },
   )
   assert.ok(wf.byId.use)
+
+  const literal = validateWorkflowSpec(makeStep('Inline JSON: {"outer":{"ok":true}}'))
+  assert.equal(literal.spec.steps[0].prompt, 'Inline JSON: {"outer":{"ok":true}}')
 })
 
 test("supports loop variables inside map/loop bodies and until conditions", () => {
@@ -950,6 +951,8 @@ test("renderTemplate interpolates strings, scalars, JSON values, and local scope
   assert.equal(renderTemplate("nested {{ gather.items }}", store), `nested ${JSON.stringify([{ name: "a" }, { name: "b" }])}`)
   assert.equal(renderTemplate("", store), "")
   assert.equal(renderTemplate("{{ gather.title }}{{ gather.title }}", store), "ReportReport")
+  assert.equal(renderTemplate('json={"outer":{"ok":true}}', store), 'json={"outer":{"ok":true}}')
+  assert.equal(renderTemplate("Use {{ gather.title }} then }} literally", store), "Use Report then }} literally")
 
   const local = { item: { name: "x", n: 2 }, other: 9 }
   assert.equal(renderTemplate("row={{ item.name }}", store, local), "row=x")
@@ -960,8 +963,6 @@ test("renderTemplate rejects malformed templates and unresolvable references", (
   const store = { a: { b: [1] } }
   const badTemplates = [
     ["Use {{ a.b.", /unterminated/],
-    ["Use {{ a.b }} then }} more", /stray/],
-    ["Text }} early", /stray/],
     ["Use {{ }}.", /empty/],
     ["Use {{ {{ a.b }} }}.", /nested/],
     ["Use {{ nope.field }}.", /does not match any step id/],

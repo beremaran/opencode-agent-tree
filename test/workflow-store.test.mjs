@@ -268,6 +268,52 @@ test("caches completed results by instance id and fingerprint, and resumes runs"
   assert.ok(lines.some((event) => event.type === "resume"))
 })
 
+test("resume atomically preserves completed nodes and resets stale unfinished state", async (t) => {
+  const { store } = await withStore(t)
+  const run = await store.createRun({
+    instanceId: "resume-nodes",
+    workflow: "demo",
+    fingerprint: "resume-fingerprint",
+    spec: makeSpec(),
+  })
+  await store.updateRun(run.runId, { status: "running" })
+  await store.updateRun(run.runId, {
+    result: { instanceKey: "done", stepId: "done", value: "kept" },
+  })
+  await store.updateRun(run.runId, {
+    node: {
+      instanceKey: "failed",
+      node: {
+        instanceKey: "failed",
+        stepId: "failed",
+        status: "failed",
+        sessionId: "old-session",
+        worktree: { directory: "/tmp/old-worktree" },
+        attempts: 1,
+        usage: { tokensIn: 7, tokensOut: 3 },
+        startedAt: "2026-08-03T00:00:00.000Z",
+        finishedAt: "2026-08-03T00:01:00.000Z",
+        error: "stale failure",
+      },
+    },
+  })
+  await store.updateRun(run.runId, { status: "failed", error: "stale run failure" })
+
+  const resumed = await store.resumeRun(run.runId)
+
+  assert.equal(resumed.status, "running")
+  assert.equal(resumed.error, undefined)
+  assert.equal(resumed.nodes.done.status, "completed")
+  assert.equal(resumed.nodes.done.outputRef !== undefined, true)
+  assert.deepEqual(resumed.nodes.failed, {
+    instanceKey: "failed",
+    stepId: "failed",
+    status: "pending",
+    attempts: 1,
+    usage: { tokensIn: 7, tokensOut: 3 },
+  })
+})
+
 test("expectedSeq retries are idempotent and gaps are rejected", async (t) => {
   const { store, root } = await withStore(t)
   const run = await store.createRun({ instanceId: "i", workflow: "w", fingerprint: "f", spec: makeSpec() })

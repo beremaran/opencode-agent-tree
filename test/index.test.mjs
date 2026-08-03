@@ -83,8 +83,9 @@ test("routes only eligible agents and preserves explicit models", async () => {
     "workflow_list_saved",
   ])
   assert.equal(config.command["subagent-model"].agent, "orchestrator")
-  assert.match(config.command.workflow.template, /workflow_start.*spec only/)
+  assert.match(config.command.workflow.template, /workflow_start.*wait: true/)
   assert.match(config.command.workflow.template, /Never also pass name/)
+  assert.match(config.command.workflow.template, /one-shot `opencode run`/)
 })
 
 test("explicit agent selection is filtered, deduplicated, and accurately logged", async () => {

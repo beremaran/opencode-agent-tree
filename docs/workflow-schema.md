@@ -86,13 +86,13 @@ type SynthesizeStep = StepBase & {
 }
 ```
 
-`input` contains explicit prior-result references. Prompt references are also tracked as dependencies.
+`input` contains explicit prior-result references as raw tokens, for example `input: ["audits"]`. Prompt references are also tracked as dependencies and use interpolation syntax, for example `Review {{ audits }}`. Do not write `input: ["{{ audits }}"]`.
 
 ## Structured Outputs
 
 `outputSchema` must be a complete, valid JSON Schema object with a top-level string `type`. A shorthand field map such as `{ "profile": "object" }` is not a schema and is rejected during workflow validation.
 
-The plugin appends the schema as a final-response contract, parses the completed response as JSON, and validates the value locally. It deliberately does not use OpenCode's provider-native `json_schema` output mode, which keeps structured workflow steps compatible with thinking models that reject forced tool choice. A non-JSON response or schema mismatch raises a structured-output error and participates in the step's normal `retry` policy.
+The plugin appends the schema as a final-response contract, parses the terminal response as JSON, and validates the value locally. It deliberately does not use OpenCode's provider-native `json_schema` output mode, which keeps structured workflow steps compatible with thinking models that reject forced tool choice. A single fenced JSON value embedded in prose is accepted only when it validates against the schema. Otherwise the plugin makes one bounded format-only repair request in the same child session; a remaining non-JSON response or schema mismatch raises a structured-output error and participates in the step's normal fresh-session `retry` policy.
 
 ## Sequence And Parallel
 
@@ -171,6 +171,8 @@ Audit {{ item.path }} for {{ input.issueType }}.
 ```
 
 Strings are inserted directly. Scalars use their string form. Objects and arrays use JSON.
+
+Closing braces outside a matched `{{ reference }}` are literal text. This allows inline JSON objects to end with adjacent braces without being mistaken for a template delimiter.
 
 ## Conditions
 

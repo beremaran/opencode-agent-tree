@@ -325,8 +325,9 @@ export const resolveReference = (valueStore: unknown, ref: string): unknown => {
 }
 
 /**
- * Scans a prompt template for `{{ token }}` interpolations, rejecting stray or
- * nested braces, unterminated tokens, and empty tokens. Each token is handed
+ * Scans a prompt template for `{{ token }}` interpolations, rejecting nested
+ * openers, unterminated tokens, and empty tokens. Closing braces are ordinary
+ * literal text unless they close a matched opener. Each token is handed
  * to `onToken` for reference validation.
  */
 const scanTemplate = (
@@ -339,19 +340,13 @@ const scanTemplate = (
   while (i < length) {
     const open = template.indexOf("{{", i)
     if (open === -1) {
-      if (template.indexOf("}}", i) !== -1) {
-        fail(path, 'stray "}}" in prompt template')
-      }
       return
-    }
-    if (template.slice(i, open).includes("}}")) {
-      fail(path, 'stray "}}" before "{{" in prompt template')
     }
     const close = template.indexOf("}}", open + 2)
     if (close === -1) fail(path, 'unterminated "{{" in prompt template')
     const inner = template.slice(open + 2, close)
-    if (inner.includes("{{") || inner.includes("}}")) {
-      fail(path, 'nested "{{" or "}}" in prompt template')
+    if (inner.includes("{{")) {
+      fail(path, 'nested "{{" in prompt template')
     }
     const token = inner.trim()
     if (token === "") fail(path, 'empty "{{ }}" token in prompt template')
@@ -1406,19 +1401,15 @@ export const renderTemplate = (
   while (i < length) {
     const open = template.indexOf("{{", i)
     if (open === -1) {
-      if (template.indexOf("}}", i) !== -1) fail("$", 'stray "}}" in template')
       output += template.slice(i)
       break
-    }
-    if (template.slice(i, open).includes("}}")) {
-      fail("$", 'stray "}}" before "{{" in template')
     }
     output += template.slice(i, open)
     const close = template.indexOf("}}", open + 2)
     if (close === -1) fail("$", 'unterminated "{{" in template')
     const inner = template.slice(open + 2, close)
-    if (inner.includes("{{") || inner.includes("}}")) {
-      fail("$", 'nested "{{" or "}}" in template')
+    if (inner.includes("{{")) {
+      fail("$", 'nested "{{" in template')
     }
     const token = inner.trim()
     if (token === "") fail("$", 'empty "{{ }}" token in template')

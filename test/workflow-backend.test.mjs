@@ -235,6 +235,85 @@ test("a formatted run works through the v2 queue when session.promptAsync is una
   assert.equal("format" in calls.prompt[0], false)
 })
 
+test("recovers one schema-valid fenced JSON value embedded in prose", async () => {
+  const { client, calls } = createClient()
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    return {
+      data: [
+        userMessage(),
+        assistantMessage({ parts: [{ type: "text", text: 'Here is the result.\n```json\n{"ok":true}\n```' }] }),
+      ],
+    }
+  }
+  const backend = makeBackend(client)
+
+  const result = await backend.run({
+    sessionID: SESSION_ID,
+    prompt: "Work",
+    format: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+  })
+
+  assert.deepEqual(result.structured, { ok: true })
+  assert.equal(calls.prompt.length, 1, "valid fenced JSON does not need a repair request")
+})
+
+test("makes one in-session format repair and includes both responses in usage", async () => {
+  const { client, calls } = createClient()
+  let prompts = 0
+  client.v2.session.prompt = async (params) => {
+    calls.prompt.push(params)
+    prompts += 1
+    return { data: { id: `user-${prompts}`, sessionID: SESSION_ID, timeCreated: prompts * 100 } }
+  }
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    const first = assistantMessage({
+      id: "assist-1",
+      parentID: "user-1",
+      time: { created: 110, completed: 120 },
+      cost: 0.1,
+      tokens: { input: 10, output: 4, reasoning: 1, cache: { read: 2, write: 0 } },
+      parts: [{ type: "text", text: "not json" }],
+    })
+    if (prompts === 1) return { data: [userMessage(), first] }
+    return {
+      data: [
+        userMessage(),
+        first,
+        userMessage({ id: "user-2", time: { created: 200 } }),
+        assistantMessage({
+          id: "assist-2",
+          parentID: "user-2",
+          time: { created: 210, completed: 220 },
+          cost: 0.2,
+          tokens: { input: 20, output: 5, reasoning: 2, cache: { read: 3, write: 1 } },
+          parts: [{ type: "text", text: '{"ok":true}' }],
+        }),
+      ],
+    }
+  }
+  const backend = makeBackend(client)
+
+  const result = await backend.run({
+    sessionID: SESSION_ID,
+    prompt: "Work",
+    format: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+  })
+
+  assert.deepEqual(result.structured, { ok: true })
+  assert.ok(Math.abs(result.cost - 0.3) < Number.EPSILON)
+  assert.deepEqual(result.tokens, {
+    input: 30,
+    output: 9,
+    reasoning: 3,
+    cache: { read: 5, write: 1 },
+  })
+  assert.equal(calls.prompt.length, 2)
+  assert.match(calls.prompt[1].prompt.text, /Repair only the format/)
+  assert.match(calls.prompt[1].prompt.text, /Do not repeat the task or call tools again/)
+})
+
 test("an unformatted run prefers the durable v2 queue and passes no format", async () => {
   const { client, calls } = createClient()
   const backend = makeBackend(client)
@@ -369,8 +448,8 @@ test("propagates structured-output errors from the completed message", async () 
   )
 })
 
-test("reports invalid local JSON as a structured-output error", async () => {
-  const { client } = createClient()
+test("reports invalid local JSON after one repair and retains failed-turn usage", async () => {
+  const { client, calls } = createClient()
   const backend = makeBackend(client)
 
   await assert.rejects(
@@ -378,9 +457,17 @@ test("reports invalid local JSON as a structured-output error", async () => {
     (error) => {
       assert.ok(error instanceof StructuredOutputError)
       assert.match(error.message, /not valid JSON/)
+      assert.equal(error.partialResult.cost, 0.84)
+      assert.deepEqual(error.partialResult.tokens, {
+        input: 200,
+        output: 100,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      })
       return true
     },
   )
+  assert.equal(calls.prompt.length, 2)
 })
 
 test("reports local JSON Schema mismatches with the failing value path", async () => {
@@ -581,11 +668,18 @@ test("honors external cancellation and cancels the session", async () => {
 
 test("explicit cancel interrupts the session", async () => {
   const { client, calls } = createClient()
+  let polls = 0
+  client.session.status = async (params) => {
+    calls.status.push(params)
+    polls += 1
+    return { data: { [SESSION_ID]: { type: polls < 3 ? "busy" : "idle" } } }
+  }
   const backend = makeBackend(client)
 
   await backend.cancel(SESSION_ID)
   assert.equal(calls.interrupt.length, 1)
   assert.deepEqual(calls.interrupt[0], { sessionID: SESSION_ID })
+  assert.equal(polls, 3, "cancel waits until the child confirms it is idle")
 })
 
 test("creates a session in a fresh worktree and removes it on dispose", async () => {
@@ -750,6 +844,85 @@ test("correlates the completed assistant message with the admitted prompt", asyn
   assert.deepEqual(result.structured, { ok: true })
   assert.equal(result.cost, 0.42)
   assert.deepEqual(result.files, ["src/a.ts"])
+})
+
+test("selects the terminal assistant response and aggregates every response in the turn", async () => {
+  const { client, calls } = createClient()
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    return {
+      data: [
+        userMessage(),
+        assistantMessage({
+          id: "assist-progress",
+          time: { created: 150, completed: 160 },
+          cost: 0.1,
+          tokens: { input: 10, output: 2, reasoning: 1, cache: { read: 3, write: 0 } },
+          finish: "tool-calls",
+          parts: [
+            { type: "text", text: "I'll start by exploring the repository." },
+            { type: "patch", files: ["src/probe.ts"] },
+          ],
+        }),
+        assistantMessage({
+          id: "assist-final",
+          time: { created: 200, completed: 220 },
+          cost: 0.2,
+          tokens: { input: 20, output: 5, reasoning: 2, cache: { read: 4, write: 1 } },
+          parts: [
+            { type: "text", text: "Actual terminal result." },
+            { type: "patch", files: ["src/final.ts"] },
+          ],
+        }),
+      ],
+    }
+  }
+  const backend = makeBackend(client)
+
+  const result = await backend.run({ sessionID: SESSION_ID, prompt: "Work" })
+
+  assert.equal(result.text, "Actual terminal result.")
+  assert.ok(Math.abs(result.cost - 0.3) < Number.EPSILON)
+  assert.deepEqual(result.tokens, {
+    input: 30,
+    output: 7,
+    reasoning: 3,
+    cache: { read: 7, write: 1 },
+  })
+  assert.deepEqual(result.files, ["src/a.ts", "src/probe.ts", "src/final.ts"])
+})
+
+test("rejects empty terminal text instead of falling back to progress output", async () => {
+  const { client, calls } = createClient()
+  client.session.messages = async (params) => {
+    calls.messages.push(params)
+    return {
+      data: [
+        userMessage(),
+        assistantMessage({
+          id: "assist-progress",
+          time: { created: 150, completed: 160 },
+          finish: "tool-calls",
+          parts: [{ type: "text", text: "I'll start by exploring the repository." }],
+        }),
+        assistantMessage({
+          id: "assist-final",
+          time: { created: 200, completed: 220 },
+          parts: [{ type: "text", text: "" }],
+        }),
+      ],
+    }
+  }
+  const backend = makeBackend(client)
+
+  await assert.rejects(
+    () => backend.run({ sessionID: SESSION_ID, prompt: "Work" }),
+    (error) => {
+      assert.ok(error instanceof SessionRunError)
+      assert.equal(error.code, "empty-final-response")
+      return true
+    },
+  )
 })
 
 test("waits for the correlated assistant message to be completed", async () => {

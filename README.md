@@ -68,7 +68,7 @@ Ask for a workflow explicitly:
 /workflow Audit every route under src/routes for missing authorization. Verify every finding independently.
 ```
 
-The orchestrator creates a strict workflow specification and calls `workflow_start`. Background runs return a run id immediately and notify the parent on completion or failure. Calls with `wait=true` return the result directly and do not enqueue a redundant notification. Canceled runs remain canceled and do not produce failure notifications.
+The orchestrator creates a strict workflow specification and calls `workflow_start` with `wait=true`. The `/workflow` command runs in the foreground so a one-shot `opencode run` process stays alive until the workflow finishes. Direct `workflow_start` calls may omit `wait` to run in the background; background work lives only as long as its OpenCode server process, returns a run id immediately, and notifies the parent on completion or failure. Canceled runs remain canceled and do not produce failure notifications.
 
 Useful commands:
 
@@ -116,7 +116,7 @@ results, usage, sessions, and node state are persisted
 final result returns to the parent session
 ```
 
-The scheduler, not the model, owns concurrency, retries, limits, cancellation, and resume. Child prompts use OpenCode's asynchronous session API with the exact selected agent, model, and variant. For `outputSchema` steps, the plugin requests JSON in the final response and validates it locally; it does not rely on provider-native structured-output tool choice, so thinking models such as DeepSeek remain compatible. Completion is accepted only after the correlated assistant message is finished; status polling handles OpenCode versions where the newer wait endpoint is unavailable. Intermediate results remain in result files and child sessions, so the parent receives the final result instead of every transcript.
+The scheduler, not the model, owns concurrency, retries, limits, cancellation, and resume. Child prompts use OpenCode's asynchronous session API with the exact selected agent, model, and variant. For `outputSchema` steps, the plugin requests JSON in the final response and validates it locally; it does not rely on provider-native structured-output tool choice, so thinking models such as DeepSeek remain compatible. A single fenced JSON value embedded in otherwise non-JSON prose is recovered only when it validates, and one bounded in-session format-repair prompt is attempted before the step's fresh-session retry policy applies. Completion selects the last assistant response in the correlated turn, rejects an empty terminal response, and aggregates usage across every model response in that turn. Status polling handles OpenCode versions where the newer wait endpoint is unavailable. Intermediate results remain in result files and child sessions, so the parent receives the final result instead of every transcript.
 
 ### Workflow Tools
 
@@ -198,7 +198,7 @@ Supported operations:
 - `branch`: run the first case whose closed condition matches.
 - `loop`: repeat a body under a hard iteration bound.
 
-Prompts interpolate restricted references such as `{{ input.issue }}`, `{{ discover.files }}`, and `{{ item }}`. Conditions support `$ref`, `$eq`, `$ne`, `$lt`, `$lte`, `$gt`, `$gte`, `$and`, `$or`, and `$not`.
+Prompts interpolate restricted references such as `{{ input.issue }}`, `{{ discover.files }}`, and `{{ item }}`. In a `synthesize` step, `input` contains raw reference tokens such as `"input": ["audit"]`; braces belong only in prompt text such as `"prompt": "Review {{ audit }}"`. Literal closing braces outside a matched `{{ reference }}` are left untouched, so inline JSON is safe. Conditions support `$ref`, `$eq`, `$ne`, `$lt`, `$lte`, `$gt`, `$gte`, `$and`, `$or`, and `$not`.
 
 Every `outputSchema` must be a complete JSON Schema object with a top-level string `type`; shorthand maps such as `{ "profile": "object" }` are rejected before the run is created. Supported top-level limits are `maxParallel`, `maxAgents`, `maxIterations`, `maxTokens`, `maxCost`, and `deadline`. Fields such as `maxSteps` and `maxDurationMin` are not part of Workflow IR v1.
 
@@ -220,7 +220,7 @@ Run data lives under opencode's state directory:
 
 The append-only journal is the source of truth. Snapshots are rebuilt when missing, stale, or corrupt. Result files use hashed names and instance-scoped keys so dynamic map and loop executions do not collide.
 
-Run, node, and child-session usage is persisted from the same completed model response. Token, cost, and duration totals therefore remain consistent across status views, snapshots, and resume.
+Run, node, and child-session usage is persisted from every completed model response captured for a child attempt, including structured-format repair responses and attempts whose terminal result is rejected. Token, cost, and duration totals therefore remain consistent across status views, snapshots, and resume.
 
 On resume:
 
@@ -228,6 +228,7 @@ On resume:
 - Fingerprints include the rendered prompt, effective agent/model/variant, schema, isolation, and invocation input.
 - Changed inputs or execution parameters rerun the affected leaf.
 - Interrupted and unfinished leaves run again.
+- Nonterminal node status and stale node errors are reset atomically before resumed work is exposed as running.
 - Completed matching leaves return from the journal without another model call.
 
 Saved workflows use these locations:
@@ -311,7 +312,7 @@ Workflow options:
 ## Limits And Safety
 
 - Workflow control code has no filesystem, network, process, shell, import, or evaluation capability.
-- Agents still have the permissions of their configured OpenCode agent/session.
+- Agents still have the permissions of their configured OpenCode agent/session. Workflow approval displays the selected agents and limits, but a parent CLI `--auto` choice is not inherited by child sessions; configure bounded child-agent permissions explicitly.
 - Worktrees isolate repository edits, not processes, network access, CPU, or external directories.
 - Agent, concurrency, iteration, timeout, and deadline limits are hard scheduler limits.
 - Token and cost thresholds stop new work and cancel active work after usage is reported. Concurrent agents can cause bounded overshoot.

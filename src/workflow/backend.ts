@@ -19,9 +19,10 @@
  *     locally instead of using OpenCode's provider-native output format. This
  *     avoids forcing tool choice on incompatible thinking models and avoids
  *     OpenCode 1.18's persisted-format message decoding failure.
- *  3. The completed assistant message that answers the admitted prompt is read
- *     back, its validated structured output (when requested) or final text is
- *     returned together with the exact cost, token usage, session id, and files.
+ *  3. Every assistant response that answers the admitted prompt is read back.
+ *     The terminal response supplies validated structured output (when
+ *     requested) or final text, while cost, tokens, and files are aggregated
+ *     across the complete turn.
  *
  * Provider and structured-output failures carried on the completed message are
  * rethrown as typed errors. Timeouts and caller-supplied abort signals cancel
@@ -75,10 +76,11 @@ import { explainJsonSchemaMismatch } from "./json-schema.ts"
 /** Default poll interval for the `session.status` idle fallback. */
 const DEFAULT_POLL_INTERVAL_MS = 250
 const DEFAULT_RESULT_WAIT_MS = 10_000
+const STRUCTURED_REPAIR_ATTEMPTS = 1
 
 const STRUCTURED_OUTPUT_PREAMBLE = `Complete the task normally, including any tool use. When the task is complete, your final assistant response must contain exactly one JSON value matching the JSON Schema below. Do not wrap the JSON in Markdown or add commentary before or after it.`
 
-/** Token usage reported for a completed assistant message. */
+/** Token usage reported for one or more completed assistant responses. */
 export interface TokenUsage {
   input: number
   output: number
@@ -143,9 +145,9 @@ export interface RunResult {
   text: string
   /** Structured output when the model produced one for the requested schema. */
   structured?: unknown
-  /** Exact cost (provider currency) reported by the completed message. */
+  /** Provider cost aggregated across every assistant response in the turn. */
   cost?: number
-  /** Exact token usage reported by the completed message. */
+  /** Token usage aggregated across every assistant response in the turn. */
   tokens?: TokenUsage
   /** Provider finish reason of the completed message. */
   finish?: string
@@ -185,9 +187,16 @@ export interface SessionBackend {
 
 /** Base class for all errors raised by the session backend. */
 export class SessionBackendError extends Error {
+  partialResult?: RunResult
+
   constructor(message: string, options?: ErrorOptions) {
     super(message, options)
     this.name = "SessionBackendError"
+  }
+
+  withPartialResult(result: RunResult): this {
+    this.partialResult = result
+    return this
   }
 }
 
@@ -398,6 +407,12 @@ interface BackendMessage {
   error?: unknown
 }
 
+interface CompletedTurn {
+  user?: BackendMessage
+  assistants: BackendMessage[]
+  assistant: BackendMessage
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
@@ -415,18 +430,76 @@ const describeError = (value: unknown): string => {
 const requestStructuredOutput = (prompt: string, schema: JsonSchema): string =>
   `${prompt}\n\n<workflow-output-contract>\n${STRUCTURED_OUTPUT_PREAMBLE}\nJSON Schema:\n${JSON.stringify(schema, null, 2)}\n</workflow-output-contract>`
 
+const structuredRepairPrompt = (error: StructuredOutputError): string =>
+  `Repair only the format of your previous final response. Do not repeat the task or call tools again. The previous response failed validation with: ${error.message}`
+
 const parseJsonResponse = (text: string): unknown => {
   const trimmed = text.trim()
-  const fenced = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i)
-  const candidate = fenced?.[1]?.trim() ?? trimmed
-  if (candidate === "") {
+  if (trimmed === "") {
     throw new StructuredOutputError("agent returned an empty final response; expected JSON")
   }
-  try {
-    return JSON.parse(candidate)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new StructuredOutputError(`agent final response was not valid JSON: ${detail}`)
+
+  const candidates = [trimmed]
+  const wholeFence = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i)
+  if (wholeFence?.[1] !== undefined) candidates.unshift(wholeFence[1].trim())
+  const embeddedFences = [
+    ...trimmed.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi),
+  ]
+  if (wholeFence === null && embeddedFences.length === 1 && embeddedFences[0][1] !== undefined) {
+    candidates.push(embeddedFences[0][1].trim())
+  }
+
+  let lastError: unknown
+  for (const candidate of [...new Set(candidates)]) {
+    if (candidate === "") continue
+    try {
+      return JSON.parse(candidate)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError)
+  throw new StructuredOutputError(`agent final response was not valid JSON: ${detail}`)
+}
+
+const aggregateTokens = (entries: readonly (TokenUsage | undefined)[]): TokenUsage | undefined => {
+  const values = entries.flatMap((entry) => entry === undefined ? [] : [entry])
+  if (values.length === 0) return undefined
+  const total: TokenUsage = {
+    input: values.reduce((sum, value) => sum + value.input, 0),
+    output: values.reduce((sum, value) => sum + value.output, 0),
+  }
+  if (values.some((value) => value.reasoning !== undefined)) {
+    total.reasoning = values.reduce((sum, value) => sum + (value.reasoning ?? 0), 0)
+  }
+  if (values.some((value) => value.cache !== undefined)) {
+    total.cache = {
+      read: values.reduce((sum, value) => sum + (value.cache?.read ?? 0), 0),
+      write: values.reduce((sum, value) => sum + (value.cache?.write ?? 0), 0),
+    }
+  }
+  if (values.some((value) => value.total !== undefined)) {
+    total.total = values.reduce(
+      (sum, value) => sum + (value.total ?? value.input + value.output + (value.reasoning ?? 0)),
+      0,
+    )
+  }
+  return total
+}
+
+const aggregateCost = (values: readonly (number | undefined)[]): number | undefined =>
+  values.some((value) => value !== undefined)
+    ? values.reduce<number>((total, value) => total + (value ?? 0), 0)
+    : undefined
+
+const mergeRunResults = (results: readonly RunResult[]): RunResult => {
+  const final = results.at(-1)
+  if (final === undefined) throw new SessionBackendError("cannot merge an empty run result list")
+  return {
+    ...final,
+    cost: aggregateCost(results.map((result) => result.cost)),
+    tokens: aggregateTokens(results.map((result) => result.tokens)),
+    files: [...new Set(results.flatMap((result) => result.files))],
   }
 }
 
@@ -743,26 +816,37 @@ export class OpenCodeSessionBackend implements SessionBackend {
     this.running.add(sessionID)
     try {
       const directory = this.sessionDirs.get(sessionID) ?? this.options.directory
-      const usesLegacyPrompt =
-        (this.sessionExecution.has(sessionID) && this.client.session.promptAsync !== undefined) ||
-        !this.client.v2?.session?.prompt
-      const needsBaseline = this.promptedSessions.has(sessionID) && usesLegacyPrompt
-      const priorMessageIDs = needsBaseline
-        ? new Set((await this.readMessages(sessionID, directory, controller.signal)).map((message) => message.id))
-        : undefined
-      this.promptedSessions.add(sessionID)
-      const admittedPrompt = format === undefined ? prompt : requestStructuredOutput(prompt, format)
-      const admission = await this.promptAsync(sessionID, admittedPrompt, directory, controller.signal)
-      admission.priorMessageIDs = priorMessageIDs
-      await this.waitForIdle(sessionID, directory, admission, controller.signal)
-      const turn = await this.readCompletedTurn(sessionID, directory, admission, controller.signal)
-      const assistant = turn.assistant
-      this.throwIfFailed(assistant)
-      const result = this.buildResult(sessionID, { user: turn.user, assistant })
-      if (format !== undefined) {
-        result.structured = validateStructuredOutput(format, result.text, result.structured)
+      const results: RunResult[] = []
+      let nextPrompt = format === undefined ? prompt : requestStructuredOutput(prompt, format)
+      for (let repairAttempt = 0; ; repairAttempt++) {
+        const turn = await this.executePrompt(sessionID, nextPrompt, directory, controller.signal)
+        const result = this.buildResult(sessionID, turn)
+        results.push(result)
+        try {
+          this.throwIfFailed(turn.assistant)
+          if (format !== undefined) {
+            result.structured = validateStructuredOutput(format, result.text, result.structured)
+          } else if (result.text.trim() === "") {
+            throw new SessionRunError(
+              "empty-final-response",
+              `agent returned an empty terminal response for session "${sessionID}"`,
+            )
+          }
+          return mergeRunResults(results)
+        } catch (error) {
+          if (
+            format === undefined ||
+            !(error instanceof StructuredOutputError) ||
+            repairAttempt >= STRUCTURED_REPAIR_ATTEMPTS
+          ) {
+            if (error instanceof SessionBackendError && results.length > 0) {
+              error.withPartialResult(mergeRunResults(results))
+            }
+            throw error
+          }
+          nextPrompt = requestStructuredOutput(structuredRepairPrompt(error), format)
+        }
       }
-      return result
     } catch (error) {
       if (controller.signal.aborted) {
         await this.cancel(sessionID).catch(() => {})
@@ -786,14 +870,15 @@ export class OpenCodeSessionBackend implements SessionBackend {
     const v2 = this.client.v2?.session
     if (v2?.interrupt) {
       await unwrapPayload<void>(await v2.interrupt({ sessionID }))
-      return
+    } else {
+      await unwrapPayload<boolean>(
+        await this.client.session.abort({
+          sessionID,
+          directory: this.sessionDirs.get(sessionID) ?? this.options.directory,
+        }),
+      )
     }
-    await unwrapPayload<boolean>(
-      await this.client.session.abort({
-        sessionID,
-        directory: this.sessionDirs.get(sessionID) ?? this.options.directory,
-      }),
-    )
+    await this.waitForStopped(sessionID, this.sessionDirs.get(sessionID) ?? this.options.directory)
   }
 
   async releaseSession(handleOrSessionID: ChildSessionHandle | string): Promise<void> {
@@ -894,6 +979,24 @@ export class OpenCodeSessionBackend implements SessionBackend {
     )
   }
 
+  private async waitForStopped(sessionID: string, directory: string): Promise<void> {
+    const deadline = Date.now() + this.options.resultWaitMs
+    const signal = new AbortController().signal
+    for (;;) {
+      const statuses = unwrapPayload<Record<string, SessionStatus>>(
+        await this.client.session.status({ directory }),
+      )
+      const status = statuses?.[sessionID]
+      if (status === undefined || status.type === "idle") return
+      if (Date.now() >= deadline) {
+        throw new SessionBackendError(
+          `session "${sessionID}" did not confirm cancellation within ${this.options.resultWaitMs}ms`,
+        )
+      }
+      await sleep(this.options.pollIntervalMs, signal)
+    }
+  }
+
   private async promptAsync(
     sessionID: string,
     text: string,
@@ -943,6 +1046,26 @@ export class OpenCodeSessionBackend implements SessionBackend {
     throw new SessionBackendError(
       "OpenCode client exposes no asynchronous prompt API (v2 session.prompt or session.promptAsync)",
     )
+  }
+
+  private async executePrompt(
+    sessionID: string,
+    prompt: string,
+    directory: string,
+    signal: AbortSignal,
+  ): Promise<CompletedTurn> {
+    const usesLegacyPrompt =
+      (this.sessionExecution.has(sessionID) && this.client.session.promptAsync !== undefined) ||
+      !this.client.v2?.session?.prompt
+    const needsBaseline = this.promptedSessions.has(sessionID) && usesLegacyPrompt
+    const priorMessageIDs = needsBaseline
+      ? new Set((await this.readMessages(sessionID, directory, signal)).map((message) => message.id))
+      : undefined
+    this.promptedSessions.add(sessionID)
+    const admission = await this.promptAsync(sessionID, prompt, directory, signal)
+    admission.priorMessageIDs = priorMessageIDs
+    await this.waitForIdle(sessionID, directory, admission, signal)
+    return this.readCompletedTurn(sessionID, directory, admission, signal)
   }
 
   private async waitForIdle(
@@ -1036,7 +1159,7 @@ export class OpenCodeSessionBackend implements SessionBackend {
     directory: string,
     admission: AdmissionInfo,
     signal: AbortSignal,
-  ): Promise<{ user?: BackendMessage; assistant: BackendMessage }> {
+  ): Promise<CompletedTurn> {
     const deadline = Date.now() + this.options.resultWaitMs
     let lastReadError: unknown
     for (;;) {
@@ -1047,7 +1170,7 @@ export class OpenCodeSessionBackend implements SessionBackend {
           turn.assistant?.completed !== undefined &&
           !admission.priorMessageIDs?.has(turn.assistant.id)
         ) {
-          return { user: turn.user, assistant: turn.assistant }
+          return { user: turn.user, assistants: turn.assistants, assistant: turn.assistant }
         }
         lastReadError = undefined
       } catch (error) {
@@ -1067,10 +1190,12 @@ export class OpenCodeSessionBackend implements SessionBackend {
    * Correlates the assistant message that answers the admitted prompt. The
    * admitted user message is located by id (when the prompt API reports one),
    * then by admission time, then by falling back to the most recent user
-   * message. The assistant message is the first one after it.
+   * message. The terminal assistant message is the last response before the
+   * next user message; all responses in that turn are retained for usage.
    */
   private correlate(messages: BackendMessage[], admission: AdmissionInfo): {
     user?: BackendMessage
+    assistants: BackendMessage[]
     assistant?: BackendMessage
   } {
     let userIndex = -1
@@ -1091,23 +1216,22 @@ export class OpenCodeSessionBackend implements SessionBackend {
     }
     const user = userIndex >= 0 ? messages[userIndex] : undefined
 
-    let assistant: BackendMessage | undefined
+    let assistants: BackendMessage[] = []
     if (user !== undefined) {
-      assistant = messages
-        .slice(userIndex + 1)
-        .find((m) => m.role === "assistant" && (m.parentID === user.id || m.created >= user.created))
-    }
-    if (assistant === undefined) {
-      const floor = admission.timeCreated ?? user?.created ?? 0
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i]
-        if (m.role === "assistant" && m.created >= floor) {
-          assistant = m
+      let end = messages.length
+      for (let i = userIndex + 1; i < messages.length; i++) {
+        if (messages[i].role === "user") {
+          end = i
           break
         }
       }
+      assistants = messages.slice(userIndex + 1, end).filter((m) => m.role === "assistant")
     }
-    return { user, assistant }
+    if (assistants.length === 0) {
+      const floor = admission.timeCreated ?? user?.created ?? 0
+      assistants = messages.filter((m) => m.role === "assistant" && m.created >= floor)
+    }
+    return { user, assistants, assistant: assistants.at(-1) }
   }
 
   private throwIfFailed(message: BackendMessage): void {
@@ -1124,16 +1248,19 @@ export class OpenCodeSessionBackend implements SessionBackend {
 
   private buildResult(
     sessionID: string,
-    turn: { user?: BackendMessage; assistant: BackendMessage },
+    turn: CompletedTurn,
   ): RunResult {
     const assistant = turn.assistant
-    const files = turn.user !== undefined && turn.user.files.length > 0 ? turn.user.files : assistant.files
+    const files = [...new Set([
+      ...(turn.user?.files ?? []),
+      ...turn.assistants.flatMap((message) => message.files),
+    ])]
     return {
       sessionID,
       text: assistant.text,
       structured: assistant.structured,
-      cost: assistant.cost,
-      tokens: assistant.tokens,
+      cost: aggregateCost(turn.assistants.map((message) => message.cost)),
+      tokens: aggregateTokens(turn.assistants.map((message) => message.tokens)),
       finish: assistant.finish,
       files,
     }

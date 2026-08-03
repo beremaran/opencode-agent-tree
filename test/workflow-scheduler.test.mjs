@@ -336,6 +336,39 @@ test("retries failures in fresh sessions and records all sessions", async (t) =>
   assert.equal(loaded.nodes.flaky.attempts, 2)
 })
 
+test("persists failed response usage across fresh-session retries", async (t) => {
+  class FailedResponseBackend extends FakeBackend {
+    async run(input) {
+      this.runs.push(input)
+      throw new SessionRunError("empty-final-response", "empty terminal response").withPartialResult({
+        sessionID: input.sessionID,
+        text: "",
+        cost: 0.25,
+        tokens: { input: 2, output: 3, reasoning: 1, cache: { read: 0, write: 0 } },
+        files: [],
+      })
+    }
+  }
+  const backend = new FailedResponseBackend()
+  const f = await fixture({ backend })
+  t.after(f.cleanup)
+
+  const record = await f.scheduler.execute({
+    parentSessionID: "parent",
+    spec: {
+      version: 1,
+      limits: { maxAgents: 3 },
+      steps: [leaf("empty", "VALUE:no", { retry: 1 })],
+    },
+  })
+
+  assert.equal(record.status, "failed")
+  assert.equal(backend.runs.length, 2)
+  assert.deepEqual(record.usage, { tokensIn: 4, tokensOut: 8, cost: 0.5, durationMs: record.usage.durationMs })
+  assert.deepEqual(record.nodes.empty.usage, record.usage)
+  assert.deepEqual(record.sessions.map((session) => session.usage?.cost), [0.25, 0.25])
+})
+
 test("enforces maxAgents including retry attempts", async (t) => {
   const f = await fixture()
   t.after(f.cleanup)

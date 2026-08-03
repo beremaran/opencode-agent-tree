@@ -28,22 +28,57 @@ export interface WorkflowToolOptions {
     variant?: string
   } | undefined
   approval: "always" | "never"
+  limits?: () => {
+    maxParallel: number
+    maxAgents: number
+    maxIterations: number
+    maxTokens?: number
+    maxCost?: number
+  }
 }
 
 const objectSchema = tool.schema.record(tool.schema.string(), tool.schema.unknown())
 
 const pretty = (value: unknown): string => JSON.stringify(value, null, 2)
 
+const workflowAgentNames = (value: unknown, names = new Set<string>()): string[] => {
+  if (!Array.isArray(value)) return [...names]
+  for (const entry of value) {
+    if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
+      const record = entry as Record<string, unknown>
+      if (
+        (record.type === "agent" || record.type === "synthesize") &&
+        typeof record.agent === "string"
+      ) {
+        names.add(record.agent)
+      } else if (record.type === "synthesize" && record.agent === undefined) {
+        names.add("worker")
+      }
+      workflowAgentNames(record.steps, names)
+      if (Array.isArray(record.cases)) {
+        for (const branchCase of record.cases) {
+          if (branchCase !== null && typeof branchCase === "object" && !Array.isArray(branchCase)) {
+            workflowAgentNames((branchCase as Record<string, unknown>).steps, names)
+          }
+        }
+      }
+      workflowAgentNames(record.otherwise, names)
+    }
+  }
+  return [...names]
+}
+
 const WORKFLOW_AUTHORING_GUIDE = `The inline spec is strict JSON data, never JavaScript. workflow_start requires exactly one source: spec or name, never both:
 {version:1,name?,description?,limits?,phases?,steps:[...]}. Root steps run in sequence.
 Every step has a globally unique id, a type, optional label/phase/dependsOn.
 - agent: {id,type:"agent",agent,prompt,model?,variant?,outputSchema?,retry?,timeout?,isolation?}
-- synthesize: like agent, with optional agent and input:[references]
+- synthesize: like agent, with optional agent and input:[references]. input uses raw tokens such as ["audits"], while prompt interpolation uses {{ audits }}; never put {{ }} around input entries.
 - sequence/parallel: {id,type,steps:[...]}; parallel may set maxParallel
 - map: {id,type:"map",over:"prior.array",as:"item",maxParallel?,steps:[...]}
 - branch: {id,type:"branch",cases:[{id,when,steps}],otherwise?}
 - loop: {id,type:"loop",over?,as?,until?,maxIterations?,steps:[...]}
-Prompts interpolate only safe references such as {{ input.issue }}, {{ discover.files }}, or a map variable like {{ item }}.
+Default allowed agents are general, explore, and worker; configured agent restrictions are enforced during validation. Do not inspect plugin source to discover them.
+Prompts interpolate only safe references such as {{ input.issue }}, {{ discover.files }}, or a map variable like {{ item }}. A literal }} outside a matched {{ reference }} is ordinary text, so inline JSON is safe.
 Conditions are closed objects: {$ref:"x"}, {$eq:[{$ref:"x"},value]}, $ne/$lt/$lte/$gt/$gte, {$and:[...]}, {$or:[...]}, {$not:{...}}.
 outputSchema must be a complete JSON Schema object with a required type (for example {type:"object",properties:{answer:{type:"string"}},required:["answer"],additionalProperties:false}); shorthand field maps are invalid. The plugin requests JSON in the final response and validates it locally, so this works with models that do not support provider-native structured output.
 Supported top-level limits are maxParallel, maxAgents, maxIterations, maxTokens, maxCost, and deadline (ISO 8601). maxSteps and maxDurationMin are not supported. Set isolation:true for editing agents that need a worktree; changed worktrees are serially integrated before completion. Keep limits explicit and bounded.`
@@ -65,11 +100,25 @@ export const createWorkflowTools = (options: WorkflowToolOptions) => ({
       const spec = args.name ? await store.loadWorkflow(args.name) : (args.spec as unknown as WorkflowSpecV1)
       const name = args.name ?? spec.name ?? "workflow"
       if (options.approval === "always") {
+        const configuredLimits = options.limits?.()
         await context.ask({
           permission: "workflow",
           patterns: [name],
           always: [name],
-          metadata: { name, steps: spec.steps?.length ?? 0 },
+          metadata: {
+            name,
+            steps: spec.steps?.length ?? 0,
+            agents: workflowAgentNames(spec.steps),
+            effectiveLimits: {
+              maxParallel: spec.limits?.maxParallel ?? configuredLimits?.maxParallel,
+              maxAgents: spec.limits?.maxAgents ?? configuredLimits?.maxAgents,
+              maxIterations: spec.limits?.maxIterations ?? configuredLimits?.maxIterations,
+              maxTokens: spec.limits?.maxTokens ?? configuredLimits?.maxTokens,
+              maxCost: spec.limits?.maxCost ?? configuredLimits?.maxCost,
+              deadline: spec.limits?.deadline,
+            },
+            childPermissions: "configured OpenCode agent/session rules; parent CLI --auto is not inherited",
+          },
         })
       }
       context.metadata({ title: `Workflow: ${name}`, metadata: { status: "starting" } })

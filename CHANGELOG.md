@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- Selected the terminal child response instead of an earlier progress message, rejected empty terminal text, and accumulated cost/token usage across every response in the child turn.
+- Recovered a single schema-valid fenced JSON value and added one bounded in-session structured-format repair before fresh-session retries.
+- Waited for child sessions to confirm they stopped before workflow failure/cancellation completed.
+- Reset unfinished node states and stale node errors atomically on resume.
+- Treated unmatched closing braces as literal prompt text, so inline JSON no longer collides with workflow interpolation.
+- Made `/workflow` wait in the foreground to keep one-shot `opencode run` processes alive, while retaining explicit background starts through `workflow_start`.
+- Added canonical agent and reference examples to model-facing authoring guidance and exposed limits plus child-permission behavior in workflow approval metadata.
 - Rejected incomplete or malformed `outputSchema` objects during workflow validation and documented the exact start-source and limit contracts in model-facing guidance.
 - Enforced structured workflow results through final-response JSON plus local JSON Schema validation, avoiding OpenCode 1.18 message decoding failures and forced tool choice on incompatible thinking models.
 - Retried transient child-message reads while asynchronous prompt status is still being registered, preserving the real provider error when startup races occur.

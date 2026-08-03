@@ -60,6 +60,7 @@ export const OrchestratorPlugin: Plugin = async (pluginInput, options = {}) => {
     defaultModel: () => routing.getActiveModel().raw,
     parentExecution: (sessionID) => sessionExecutions.get(sessionID),
     approval: opts.workflows.approval,
+    limits: () => opts.workflows,
   })
 
   return {
@@ -133,7 +134,7 @@ export const OrchestratorPlugin: Plugin = async (pluginInput, options = {}) => {
       }
       if (opts.workflows.enabled) {
         command.workflow ??= {
-          template: "Design a validated dynamic workflow for `$ARGUMENTS`, then call `workflow_start` with spec only. Never also pass name; name is only for loading a saved workflow. Return the run id and keep the user informed.",
+          template: "Design a validated dynamic workflow for `$ARGUMENTS`, then call `workflow_start` with spec and `wait: true`. Never also pass name; name is only for loading a saved workflow. Review and report the completed result. Foreground waiting keeps one-shot `opencode run` processes alive until the workflow finishes.",
           description: "Start a durable dynamic workflow",
           agent: opts.orchestratorAgent,
           subtask: false,
