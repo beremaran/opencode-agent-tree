@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-03
+
+### Changed
+
+- Rolled the plugin back to its delegation enforcer roots. Removed the durable workflow engine, dedicated orchestrator/worker agents, subagent effort controls, runtime model command, and optional TUI dashboard. The plugin is again a single `src/index.ts`: it installs the orchestrator directive on the `build` agent, hard-blocks its hands-on tools, and routes all subagents to the configured `subagentModel`. Dropped the `@beremaran/opencode-agent-tree/tui` and `@beremaran/opencode-agent-tree/server` exports along with the ajv and OpenTUI dependencies.
+
 ## 0.3.1 - 2026-08-03
 
 ### Fixed
