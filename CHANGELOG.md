@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-08-03
+
 ### Fixed
 
 - Selected the terminal child response instead of an earlier progress message, rejected empty terminal text, and accumulated cost/token usage across every response in the child turn.
