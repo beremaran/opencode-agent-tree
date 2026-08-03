@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.4.1 - 2026-08-04
+
+### Fixed
+
+- Config-hook errors (e.g. a disabled orchestrator agent) are now logged through `client.app.log` before rethrowing, so startup failures surface in the log instead of failing silently.
+- `agentModels` lookups are prototype-safe (`Object.hasOwn`), so agent names colliding with `Object.prototype` keys no longer break model routing.
+
+### Added
+
+- Model options (`subagentModel`, `orchestratorModel`, `agentModels` values) are validated as `provider/model` at startup, producing a useful config error instead of a later model-not-found failure.
+- `blockedTools` entries are validated as tool names (`[a-z0-9_-]+`), preventing malformed entries from being interpolated into the orchestrator's system prompt.
+- Warnings for likely misconfigurations: blocking tools the orchestrator directive depends on, overwriting existing non-`deny` permissions, explicit `agents` lists that omit the built-in subagents, and agent names that do not exist (typo protection).
+- `engines` (`>=22.6`), a `types` entry, a narrowed peer range (`>=1.18.11 <2`), and a `funding` field in package.json.
+- CI: node 22/24 matrix, Bun smoke test, peer-drift check, and Dependabot; the publish workflow now authenticates via `NPM_TOKEN` and smoke-tests the packed tarball.
+- `SECURITY.md` and `CODE_OF_CONDUCT.md`, plus expanded README sections (validation & warnings, security, limitations, troubleshooting, model precedence).
+
 ## 0.4.0 - 2026-08-03
 
 ### Changed

@@ -28,6 +28,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify package and release tag
         env:
@@ -46,6 +48,13 @@ jobs:
 
       - name: Inspect package contents
         run: npm pack --dry-run
+
+      - name: Smoke-test packed tarball
+        run: |
+          npm pack
+          mkdir -p /tmp/agent-tree-pkg
+          tar -xzf *.tgz -C /tmp/agent-tree-pkg
+          node --experimental-strip-types -e "import('/tmp/agent-tree-pkg/package/src/index.ts').then(m => { if (typeof m.default !== 'function') process.exit(1) })"
 
       - name: Publish package
         run: npm publish

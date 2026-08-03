@@ -19,7 +19,7 @@ If a model ever ignores the directive, layer 2 still makes it delegate: the tool
 
 ## The orchestrator directive
 
-This is the exact prompt injected into the orchestrator agent's system prompt (as configured in `src/index.ts`, `orchestratorDirective`):
+This is the directive template rendered into the orchestrator's system prompt (as configured in `src/index.ts`, `orchestratorDirective`). The block below is the rendered form with default settings (no `instructions`); the two runtime substitutions are listed after it.
 
 ```markdown
 # Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
@@ -39,7 +39,7 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 ## Tool discipline
 - `task` for all work (mandatory), `todowrite` to track subtasks, `question` only to clarify genuinely ambiguous requests.
 - `read`/`glob`/`grep`/`webfetch`/`websearch` only when needed to write a better brief or verify a result.
-- Hands-on tools are hard-blocked for you (blockedTools joined, "edit, bash" by default). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
+- Hands-on tools are hard-blocked for you (edit, bash). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
 
 ## Default delegation
 - `explore` — codebase research, locating code, understanding existing implementations.
@@ -85,13 +85,28 @@ From npm:
 
 | Option              | Type                 | Default                          | Description |
 | ------------------- | -------------------- | -------------------------------- | ----------- |
-| `subagentModel`     | `string`             | **required**                     | Model for all delegated work, e.g. `"anthropic/claude-sonnet-4-6"`. Agents with an explicit `model` in `opencode.json` are never overridden. |
-| `orchestratorModel` | `string`             | agent model, else `model`        | Model for the orchestrator itself. |
+| `subagentModel`     | `string`             | **required**                     | Model for all delegated work, e.g. `"anthropic/claude-sonnet-4-6"`. Must be `provider/model` format. Agents with an explicit `model` in `opencode.json` are never overridden. See [Model precedence](#model-precedence). |
+| `orchestratorModel` | `string`             | agent model, else `model`        | Model for the orchestrator itself. Unconditionally overrides an explicit model on the orchestrator agent. |
 | `orchestratorAgent` | `string`             | `"build"`                        | Which agent acts as the orchestrator. |
-| `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. |
-| `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. |
-| `instructions`      | `string`             | —                                | Extra rules appended to the orchestrator system prompt. |
-| `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. |
+| `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. Disabled agents, primary-mode agents, and the orchestrator itself are filtered out even if listed. |
+| `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. Never applies to the orchestrator agent (it is never routed). |
+| `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
+| `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. Names must match `[a-z0-9_-]+`. |
+
+### Model precedence
+
+The effective model for a delegated subagent is resolved in this order:
+
+1. An explicit `model` set on the agent in `opencode.json`
+2. `agentModels[name]`
+3. `subagentModel`
+
+The orchestrator is asymmetric:
+
+- `orchestratorModel` **unconditionally** overrides an explicit `model` on the
+  orchestrator agent.
+- An `agentModels` entry keyed to the orchestrator agent name is silently
+  ignored — the orchestrator is never routed.
 
 ## Example
 
@@ -104,6 +119,7 @@ From npm:
       {
         "subagentModel": "anthropic/claude-sonnet-4-6",
         "orchestratorModel": "anthropic/claude-opus-4-5",
+        "agents": ["general", "explore", "worker"],
         "agentModels": { "explore": "anthropic/claude-haiku-4-5" },
         "instructions": "Never delegate more than 3 subtasks at once."
       }
@@ -112,11 +128,77 @@ From npm:
 }
 ```
 
+## Validation & warnings
+
+At startup the plugin validates the configuration and reports self-contradictory
+setups. Invalid configuration raises a config error (logged at `error` level via
+`app.log`, then rethrown); the remaining cases log a `warn` message and
+continue.
+
+| Condition | Result |
+| --------- | ------ |
+| The orchestrator agent named by `orchestratorAgent` is disabled | Config error |
+| `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (at least one `/`, non-empty on both sides; further slashes are allowed in the model part) | Config error |
+| A `blockedTools` name does not match `[a-z0-9_-]+` (lowercase letters, digits, underscore, hyphen) | Config error |
+| `blockedTools` includes a directive-dependent tool (`task`, `todowrite`, `question`, `read`, `glob`, `grep`, `webfetch`, `websearch`) | Warning: the orchestrator is told to delegate with a tool it cannot use |
+| A blocked tool's existing permission on the orchestrator agent is overwritten with `deny` | Warning naming the tool and agent |
+| An explicit `agents` list omits both built-in subagents (`general`, `explore`) | Warning: routing and the directive diverge |
+| `agents` contains a name that is neither a built-in subagent nor an agent in `opencode.json` | Warning: a phantom agent entry is created (typo protection) |
+
+## Security
+
+The plugin enforces behavior through configuration, so its security surface is
+the configuration it runs with. Only use this plugin with config you control.
+
+- **`instructions` is injected verbatim** into the orchestrator's system
+  prompt. An untrusted config can append arbitrary prompt rules that the model
+  may follow.
+- **The tool block is an explicit allow/deny list, not categorical.** A renamed
+  upstream tool, or a future mutating tool the plugin does not know about,
+  would not be auto-blocked.
+- **Subagents keep their hands-on tools.** Delegation does not remove tools
+  from subagents; the plugin constrains the orchestrator, not the subagents. A
+  delegated subagent can still `edit` and `bash`.
+- **`orchestratorModel` can override an explicitly configured model** on the
+  orchestrator agent.
+
+See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
+
+## Limitations
+
+- Enforcement is prompt + permission based. Non-compliant models can still cut
+  corners — for example doing their own research instead of delegating — where
+  the permission block does not forbid the action.
+- The `task` tool is assumed to be available to the orchestrator.
+- Once work is delegated to a subagent, the plugin cannot stop it from doing
+  that work.
+- Supported opencode range: `>=1.18.11 <2` (per `peerDependencies`).
+
+## Troubleshooting
+
+- **Restart after config changes.** Options are read at startup; edit
+  `opencode.json` and restart opencode to apply them.
+- **Check the startup log line.** A healthy load logs
+  `Orchestrator "build" enabled; subagents -> <subagentModel>`.
+- **`The orchestrator agent "X" is disabled`** is a config error: the agent
+  named by `orchestratorAgent` has `disable: true`. Enable it or choose another
+  orchestrator.
+- **A warning you did not expect** — the four warning cases above log at
+  `warn` level naming the offending tool, agent, or config value; the config is
+  probably not doing what you intend.
+- **"My explicitly-configured agent model is not used"** — for the orchestrator
+  this is expected: `orchestratorModel` unconditionally overrides it, and
+  `agentModels` entries keyed to it are ignored. For subagents, an explicit
+  `model` in `opencode.json` wins over `agentModels` and `subagentModel` by
+  design. See [Model precedence](#model-precedence).
+
 ## Notes
 
 - Subagents keep their default tools; only the orchestrator is restricted. Switch to the `plan` agent or another primary anytime.
 - The directive is installed on the orchestrator agent only — subagents never receive it.
-- Built-in subagents (`general`, `explore`) and every user-defined subagent/all-mode agent are routed to `subagentModel`; agents with an explicit `model` in `opencode.json` are respected.
+- The directive is appended only once: the `# Orchestrator Mode` marker in the
+  prompt prevents re-appending if the config hook re-runs or opencode reloads
+  the plugin. This is deliberate.
 
 ## Development
 

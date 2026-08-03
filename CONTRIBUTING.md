@@ -22,9 +22,10 @@ e.g.:
 Expected behavior:
 
 1. The orchestrator (`build`) does **not** edit the file itself.
-2. It spawns a subagent via `task` (see the `✓ Create test.txt file — General Agent`
-   step in the TUI).
-3. The subagent streams with the model configured in `subagentModel`
+2. It delegates the work to a subagent via the `task` tool — in opencode the
+   work appears as a delegated task from the orchestrator, not as direct work
+   by the `build` agent.
+3. The subagent runs with the model configured in `subagentModel`
    (check `opencode run --print-logs` for the `stream` lines).
 
 Verify the startup log line is present:
