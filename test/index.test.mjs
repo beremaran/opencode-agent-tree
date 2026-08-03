@@ -70,7 +70,18 @@ test("routes only eligible agents and preserves explicit models", async () => {
   assert.equal(config.agent.orchestrator.permission.task, "allow")
   assert.equal(config.agent.orchestrator.permission.todowrite, "allow")
   assert.equal(config.agent.orchestrator.permission.question, "allow")
-  assert.deepEqual(logs.at(-1).body.extra.orchestratorTools, ["task", "todowrite", "question"])
+  assert.deepEqual(logs.at(-1).body.extra.orchestratorTools, [
+    "task",
+    "todowrite",
+    "question",
+    "workflow_start",
+    "workflow_status",
+    "workflow_result",
+    "workflow_cancel",
+    "workflow_resume",
+    "workflow_save",
+    "workflow_list_saved",
+  ])
   assert.equal(config.command["subagent-model"].agent, "orchestrator")
 })
 
@@ -115,6 +126,13 @@ test("configuration is idempotent and custom orchestrators are primary agents", 
     task: "allow",
     todowrite: "allow",
     question: "allow",
+    workflow_start: "allow",
+    workflow_status: "allow",
+    workflow_result: "allow",
+    workflow_cancel: "allow",
+    workflow_resume: "allow",
+    workflow_save: "allow",
+    workflow_list_saved: "allow",
   })
   assert.equal((config.agent.lead.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
   assert.deepEqual(logs.at(-1).body.extra.routedAgents, ["general", "explore", "worker", "helper"])
@@ -129,6 +147,13 @@ test("invalid options fail with a useful error instead of a runtime TypeError", 
     task: "allow",
     todowrite: "allow",
     question: "allow",
+    workflow_start: "allow",
+    workflow_status: "allow",
+    workflow_result: "allow",
+    workflow_cancel: "allow",
+    workflow_resume: "allow",
+    workflow_save: "allow",
+    workflow_list_saved: "allow",
     edit: "deny",
     write: "deny",
     apply_patch: "deny",
@@ -153,6 +178,70 @@ test("invalid options fail with a useful error instead of a runtime TypeError", 
     const { input, logs } = createInput()
     await assert.rejects(() => OrchestratorPlugin(input, options), /subagentEffort|agentEfforts/)
     assert.equal(logs.at(-1).body.level, "error")
+  }
+})
+
+test("workflows can be disabled without exposing tools, commands, or prompt guidance", async () => {
+  const { config, hooks, logs } = await apply(
+    { subagentModel: "fallback/model", workflows: false },
+    { agent: {} },
+  )
+
+  assert.deepEqual(Object.keys(hooks.tool), [])
+  assert.equal(config.command.workflow, undefined)
+  assert.equal(config.command.workflows, undefined)
+  assert.equal(config.agent.orchestrator.permission.workflow_start, undefined)
+  assert.doesNotMatch(config.agent.orchestrator.prompt, /workflow_start/)
+  assert.deepEqual(logs.at(-1).body.extra.orchestratorTools, ["task", "todowrite", "question"])
+})
+
+test("validates and logs workflow runtime options", async () => {
+  const { config, logs } = await apply(
+    {
+      subagentModel: "fallback/model",
+      workflows: {
+        approval: "never",
+        maxParallel: 2,
+        maxAgents: 12,
+        maxIterations: 7,
+        stepTimeout: 60,
+        maxTokens: 1000,
+        maxCost: 2.5,
+        autoResume: true,
+        notifyParent: false,
+      },
+    },
+    { agent: {} },
+  )
+
+  assert.equal(config.command.workflow.agent, "orchestrator")
+  assert.deepEqual(logs.at(-1).body.extra.workflows, {
+    enabled: true,
+    approval: "never",
+    maxParallel: 2,
+    maxAgents: 12,
+    maxIterations: 7,
+    stepTimeout: 60,
+    maxTokens: 1000,
+    maxCost: 2.5,
+    autoResume: true,
+    notifyParent: false,
+  })
+
+  for (const workflows of [
+    null,
+    { approval: "sometimes" },
+    { maxParallel: 0 },
+    { maxAgents: 1.5 },
+    { maxIterations: -1 },
+    { stepTimeout: 0 },
+    { maxTokens: 0 },
+    { maxCost: -1 },
+    { autoResume: "yes" },
+    { unknown: true },
+  ]) {
+    const { input } = createInput()
+    await assert.rejects(() => OrchestratorPlugin(input, { subagentModel: "fallback/model", workflows }), /workflows/)
   }
 })
 
@@ -220,6 +309,25 @@ test("chat model command and model options reject invalid references", async () 
 
   const { input } = createInput()
   await assert.rejects(() => OrchestratorPlugin(input, { subagentModel: "missing-provider" }), /provider\/model-id/)
+})
+
+test("workflow completion notifications cannot recursively start workflows", async () => {
+  const { hooks } = await apply({ subagentModel: "fallback/model" }, { agent: {} })
+  const message = {
+    agent: "orchestrator",
+    model: { providerID: "provider", modelID: "model", variant: "high" },
+    tools: { workflow_start: true, workflow_result: true },
+  }
+  await hooks["chat.message"](
+    { sessionID: "parent", agent: "orchestrator" },
+    {
+      message,
+      parts: [{ type: "text", text: "[workflow-complete:abc] Inspect the result." }],
+    },
+  )
+  assert.equal(message.tools.workflow_start, false)
+  assert.equal(message.tools.workflow_result, true)
+  assert.equal(message.model.variant, "high")
 })
 
 test("does not silently replace a user-defined subagent-model command", async () => {
