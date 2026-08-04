@@ -1,7 +1,6 @@
 import type { Config, Plugin } from "@opencode-ai/plugin"
 
 const PLUGIN_ID = "@beremaran/opencode-agent-tree"
-const DIRECTIVE_MARKER = "# Orchestrator Mode"
 
 /**
  * Options accepted by the plugin's factory. The SDK `Plugin` type is not
@@ -31,34 +30,58 @@ export interface OrchestratorOptions {
   orchestratorAgent?: string
 
   /**
+   * Number of orchestrator levels in the delegation chain. Default: 1. With
+   * depth N the orchestrator levels are named `<orchestratorAgent>`,
+   * `<orchestratorAgent>-2`, ..., `<orchestratorAgent>-N`. Intermediate
+   * levels (1..N-1) can only delegate to the next level via their `task`
+   * permission; only the final level's routed subagents (general, explore)
+   * keep their hands-on tools.
+   */
+  orchestratorDepth?: number
+
+  /**
+   * Per-level orchestrator model overrides. `orchestratorModels[0]` sets the
+   * model for the top level (e.g. "Manager"), `orchestratorModels[1]` for
+   * "Manager-2", etc. Optional; when a level has no entry, it falls back to
+   * `orchestratorModel`, then to the agent's existing/default model. Entries
+   * must be `provider/model` format. Length must not exceed
+   * `orchestratorDepth`.
+   */
+  orchestratorModels?: string[]
+
+  /**
    * Restrict which agents get routed to `subagentModel`. Defaults to every
    * built-in subagent (general, explore) plus all subagent/all-mode agents
-   * already declared by the user. The orchestrator agent is never routed.
+   * already declared by the user. Orchestrator level agents are never routed.
    */
   agents?: string[]
 
   /**
    * Per-agent model overrides, keyed by agent name. Wins over
-   * `subagentModel`.
+   * `subagentModel`. Never applies to orchestrator level agents (they are
+   * never routed).
    */
   agentModels?: Record<string, string>
 
   /**
-   * Extra rules appended verbatim to the orchestrator's system prompt.
+   * Extra rules appended verbatim to the top-level orchestrator's system
+   * prompt.
    */
   instructions?: string
 
   /**
-   * Tools hard-blocked for the orchestrator via its agent `permission`
-   * config. Default: ["edit", "bash"]. Pass `[]` for prompt-only
+   * Tools hard-blocked for every orchestrator level via its agent
+   * `permission` config. Default: ["edit", "bash"]. Pass `[]` for prompt-only
    * enforcement.
    */
   blockedTools?: string[]
 
   /**
-   * When true, the orchestrator's `permission.task` rule is set to deny
-   * delegation to every agent except the routed subagents, so the
-   * orchestrator can only delegate to them. Default: false.
+   * When true, the FINAL orchestrator level's `permission.task` rule is set
+   * to deny delegation to every agent except the routed subagents, so it can
+   * only delegate to them. Intermediate levels always get a structurally
+   * pinned task rule (to the next level) regardless of this option. Default:
+   * false.
    */
   restrictTask?: boolean
 }
@@ -76,6 +99,8 @@ type NormalizedOptions = {
   subagentModel: string
   orchestratorModel?: string
   orchestratorAgent: string
+  orchestratorDepth: number
+  orchestratorModels?: string[]
   agents?: string[]
   agentModels: Record<string, string>
   instructions?: string
@@ -118,6 +143,21 @@ const BLOCKED_TOOL_PATTERN = /^[a-z0-9_-]+$/
 
 const MODEL_PATTERN = /^[^\s/]+\/[^\s/]+$/
 
+/**
+ * The rendered header line of the level-1 directive. Level 1 keeps this
+ * header exactly (both the rendered prompt and the idempotency marker), so
+ * `orchestratorDepth: 1` stays byte-identical to the pre-chain directive.
+ * Deeper levels use `# Orchestrator Mode (level i/N, enforced by
+ * @beremaran/opencode-agent-tree)`.
+ */
+const LEVEL1_DIRECTIVE_MARKER = "# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)"
+
+/** Per-level prompt marker: prevents re-appending the directive on re-runs. */
+const levelDirectiveMarker = (level: number, depth: number): string =>
+  level === 1
+    ? LEVEL1_DIRECTIVE_MARKER
+    : `# Orchestrator Mode (level ${level}/${depth}, enforced by @beremaran/opencode-agent-tree)`
+
 const isSubagentLike = (agent: AgentLike | undefined) =>
   !agent || agent.mode === undefined || agent.mode === "subagent" || agent.mode === "all"
 
@@ -138,6 +178,13 @@ const nonEmptyString = (value: unknown, name: string): string => {
 const booleanOption = (value: unknown, name: string): boolean => {
   if (typeof value !== "boolean") invalidOption(name, "a boolean")
   return value as boolean
+}
+
+const positiveIntegerOption = (value: unknown, name: string): number => {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    invalidOption(name, "a positive integer")
+  }
+  return value as number
 }
 
 const optionalString = (value: unknown, name: string): string | undefined => {
@@ -169,6 +216,28 @@ const modelString = (value: unknown, name: string): string => {
   return model
 }
 
+/**
+ * Normalizes the optional `orchestratorModels` option: an array of
+ * `provider/model` strings, one per orchestrator level. `undefined` and an
+ * empty array are both treated as "not provided" (no per-level overrides).
+ * Entries are validated with `stringArray` (rejects non-arrays and
+ * empty/non-string entries) then `modelString` (rejects malformed model ids).
+ * The array length must not exceed `orchestratorDepth`.
+ */
+const normalizeOrchestratorModels = (value: unknown, orchestratorDepth: number): string[] | undefined => {
+  if (value === undefined) return undefined
+  const models = stringArray(value, "orchestratorModels").map((model) =>
+    modelString(model, "orchestratorModels"),
+  )
+  if (models.length === 0) return undefined
+  if (models.length > orchestratorDepth) {
+    throw new Error(
+      `[${PLUGIN_ID}] The \`orchestratorModels\` option has ${models.length} entries but \`orchestratorDepth\` is ${orchestratorDepth}.`,
+    )
+  }
+  return models
+}
+
 const validateBlockedTools = (names: string[]): string[] => {
   for (const name of names) {
     if (!BLOCKED_TOOL_PATTERN.test(name)) {
@@ -189,8 +258,23 @@ const defaultAgentOf = (cfg: Config): string => {
 }
 
 /**
- * Builds the `task` permission rule for restrictTask mode: deny delegation
- * to every agent except the routed subagents (e.g.
+ * Reads opencode's `subagent_depth` config defensively for the chain-depth
+ * warning. The `Config` type from @opencode-ai/plugin may not expose the field
+ * (the SDK's `types.gen.d.ts` declares `subagent_depth?: number`), so it is
+ * read via an intersection cast. Mirrors opencode's `?? 1` default: only an
+ * integer number >= 0 counts as an explicit limit; anything else (missing,
+ * string, fractional, negative) falls back to 1. An explicit `0` is a real
+ * limit of 0.
+ */
+const subagentDepthOf = (cfg: Config): number => {
+  const value = (cfg as Config & { subagent_depth?: unknown }).subagent_depth
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 1
+}
+
+/**
+ * Builds the `task` permission rule for a delegation target: deny delegation
+ * to every agent except the allowed ones (e.g.
+ * `{ "*": "deny", "Manager-2": "allow" }` or, for restrictTask,
  * `{ "*": "deny", "general": "allow", "explore": "allow" }`).
  */
 const taskRuleFor = (targets: string[]): Record<string, "deny" | "allow"> => {
@@ -199,7 +283,7 @@ const taskRuleFor = (targets: string[]): Record<string, "deny" | "allow"> => {
   return rule
 }
 
-/** Structural equality check used to keep restrictTask idempotent. */
+/** Structural equality check used to keep task rules idempotent. */
 const sameTaskRule = (value: unknown, expected: Record<string, "deny" | "allow">): boolean => {
   if (!isRecord(value)) return false
   const keys = Object.keys(value)
@@ -230,6 +314,11 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
   const agents = options.agents === undefined ? undefined : stringArray(options.agents, "agents")
   const restrictTask =
     options.restrictTask === undefined ? false : booleanOption(options.restrictTask, "restrictTask")
+  const orchestratorDepth =
+    options.orchestratorDepth === undefined
+      ? 1
+      : positiveIntegerOption(options.orchestratorDepth, "orchestratorDepth")
+  const orchestratorModels = normalizeOrchestratorModels(options.orchestratorModels, orchestratorDepth)
   const orchestratorModel =
     options.orchestratorModel === undefined ||
     options.orchestratorModel === null ||
@@ -247,6 +336,8 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
       options.orchestratorAgent === undefined
         ? DEFAULTS.orchestratorAgent
         : nonEmptyString(options.orchestratorAgent, "orchestratorAgent"),
+    orchestratorDepth,
+    orchestratorModels,
     agents,
     agentModels,
     instructions: optionalString(options.instructions, "instructions"),
@@ -255,10 +346,43 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
   }
 }
 
-const orchestratorDirective = (opts: NormalizedOptions) => {
+/**
+ * Ordered list of orchestrator level agent names for the normalized options:
+ * `["Manager"]` for depth 1, `["Manager", "Manager-2", "Manager-3"]` for
+ * depth 3.
+ */
+const orchestratorLevels = (opts: NormalizedOptions): string[] => {
+  const names = [opts.orchestratorAgent]
+  for (let level = 2; level <= opts.orchestratorDepth; level += 1) {
+    names.push(`${opts.orchestratorAgent}-${level}`)
+  }
+  return names
+}
+
+/**
+ * Renders the level-aware orchestrator directive.
+ *
+ * - `(level 1, depth 1)` — the single-level directive, byte-identical to the
+ *   pre-`orchestratorDepth` template.
+ * - `(level < depth)` — an intermediate level: may only delegate to
+ *   `nextName` and never does hands-on work; no Default delegation section.
+ * - `(level === depth, depth > 1)` — the final level of a chain: delegates to
+ *   the routed subagents and includes the Default delegation section.
+ *
+ * `instructions` is appended only to the level-1 directive (the top level).
+ */
+const orchestratorDirective = (
+  opts: NormalizedOptions,
+  level: number,
+  depth: number,
+  nextName: string | undefined,
+): string => {
   const blocked = opts.blockedTools.length > 0 ? opts.blockedTools.join(", ") : "none"
-  const extra = opts.instructions ? `\n\n${opts.instructions}` : ""
-  return `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
+  const extra = opts.instructions && level === 1 ? `\n\n${opts.instructions}` : ""
+
+  if (depth === 1) {
+    // Byte-identical to the pre-orchestratorDepth single-level directive.
+    return `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
 
 You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, delegate, and review.
 
@@ -281,6 +405,147 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 - \`explore\` — codebase research, locating code, understanding existing implementations.
 - \`general\` — implementation, refactoring, testing, and any task without a more specific subagent.
 - Prefer the most specialized subagent for each subtask; fall back to \`general\`.${extra}`
+  }
+
+  const header = levelDirectiveMarker(level, depth)
+
+  if (level < depth) {
+    // Intermediate orchestrator level: structurally pinned to the next level.
+    const target = nextName as string
+    return `${header}
+
+You are ORCHESTRATOR level ${level} of ${depth} in a delegation chain. You do not do hands-on work. You plan, decompose, delegate, and review.
+
+## Non-negotiable rules
+1. Treat every request from the level above as a project: break it into discrete, independently verifiable subtasks before touching anything.
+2. Delegate EVERY subtask with the \`task\` tool, and ONLY to \`${target}\`. Never perform implementation work yourself.
+3. Never delegate to worker subagents — only the FINAL orchestrator level delegates to them. Your only \`task\` target is \`${target}\`.
+4. Dispatch independent subtasks in parallel (multiple \`task\` calls in a single message). Never run dependent subtasks concurrently — wait for each result before dispatching the next.
+5. Give \`${target}\` a complete, self-contained brief: goal, constraints, files involved, verification steps, and exactly what to report back.
+6. Review every report from \`${target}\`. If work is incomplete or wrong, delegate the fix back to \`${target}\` — never fix it yourself.
+7. Reuse a running \`${target}\` session via its task_id when follow-up work belongs to the same context.
+8. Keep the level above informed: report what was delegated, the results, blockers, and the final state.
+
+## Tool discipline
+- \`task\` for all work (mandatory), \`todowrite\` to track subtasks, \`question\` only to clarify genuinely ambiguous requests.
+- \`read\`/\`glob\`/\`grep\`/\`webfetch\`/\`websearch\` only when needed to write a better brief or verify a result.
+- Hands-on tools are hard-blocked for you (${blocked}). If \`${target}\` lacks a tool it needs, tell the level above instead of doing it yourself.${extra}`
+  }
+
+  // Final level of a multi-level chain: delegates to the routed subagents.
+  return `${header}
+
+You are ORCHESTRATOR level ${level} of ${depth} in a delegation chain — the FINAL orchestrator level. You do not do hands-on work. You plan, decompose, delegate, and review. Your subagents (\`explore\`, \`general\`) have the hands-on tools; they do the implementation.
+
+## Non-negotiable rules
+1. Treat every user request as a project: break it into discrete, independently verifiable subtasks before touching anything.
+2. Delegate EVERY subtask with the \`task\` tool to a subagent. Never perform implementation work yourself.
+3. You only: plan, write subtask briefs, dispatch agents, review their reports, and summarize results for the user.
+4. Dispatch independent subtasks in parallel (multiple \`task\` calls in a single message). Never run dependent subtasks concurrently — wait for each result before dispatching the next.
+5. Give each subagent a complete, self-contained brief: goal, constraints, files involved, verification steps, and exactly what to report back.
+6. Review every subagent report. If work is incomplete or wrong, delegate the fix to a subagent — never fix it yourself.
+7. Reuse a running subagent via its task_id when follow-up work belongs to the same context.
+8. Keep the user informed: report what was delegated to whom, the results, blockers, and the final state.
+
+## Tool discipline
+- \`task\` for all work (mandatory), \`todowrite\` to track subtasks, \`question\` only to clarify genuinely ambiguous requests.
+- \`read\`/\`glob\`/\`grep\`/\`webfetch\`/\`websearch\` only when needed to write a better brief or verify a result.
+- Hands-on tools are hard-blocked for you (${blocked}). If a subagent lacks a tool it needs, tell the user instead of doing it yourself.
+
+## Default delegation
+- \`explore\` — codebase research, locating code, understanding existing implementations.
+- \`general\` — implementation, refactoring, testing, and any task without a more specific subagent.
+- Prefer the most specialized subagent for each subtask; fall back to \`general\`.${extra}`
+}
+
+type LogBody = {
+  service: string
+  level: "error" | "warn" | "info"
+  message: string
+  extra?: Record<string, unknown>
+}
+
+type LogEntry = {
+  body: LogBody
+}
+
+type LogFn = (entry: LogEntry) => Promise<void>
+
+/**
+ * Returns a fresh, shallow-copied permission object for the agent, logging a
+ * warning when an existing non-object permission is replaced (mirrors the
+ * historical behavior of treating a missing or malformed permission as an
+ * empty object).
+ */
+const permissionFor = async (
+  entry: AgentLike,
+  name: string,
+  log: LogFn,
+): Promise<Record<string, unknown>> => {
+  const rawPermission = entry.permission
+  if (!isRecord(rawPermission)) {
+    await log({
+      body: {
+        service: PLUGIN_ID,
+        level: "warn",
+        message: `Orchestrator agent "${name}" has a non-object permission; replacing it with an empty permission object`,
+      },
+    })
+    return {}
+  }
+  return { ...rawPermission }
+}
+
+/** Merges the blocked-tools denies into the agent's permission object. */
+const applyBlockedTools = async (
+  entry: AgentLike,
+  name: string,
+  blockedTools: string[],
+  log: LogFn,
+): Promise<void> => {
+  if (blockedTools.length === 0) return
+  const permission = await permissionFor(entry, name, log)
+  for (const tool of blockedTools) {
+    if (permission[tool] !== undefined && permission[tool] !== "deny") {
+      await log({
+        body: {
+          service: PLUGIN_ID,
+          level: "warn",
+          message: isRecord(permission[tool])
+            ? `Overwriting existing command-scoped rules for tool "${tool}" on agent "${name}" with blanket "deny"`
+            : `Overwriting existing permission for tool "${tool}" on agent "${name}" with "deny"`,
+        },
+      })
+    }
+    permission[tool] = "deny"
+  }
+  entry.permission = permission
+}
+
+/** Sets (or preserves) the agent's `task` permission rule, warning on clobber. */
+const applyTaskRule = async (
+  entry: AgentLike,
+  name: string,
+  rule: Record<string, "deny" | "allow">,
+  log: LogFn,
+): Promise<void> => {
+  const permission = await permissionFor(entry, name, log)
+  const existingTask = permission.task
+  if (existingTask !== undefined && !sameTaskRule(existingTask, rule)) {
+    await log({
+      body: {
+        service: PLUGIN_ID,
+        level: "warn",
+        message: isRecord(existingTask)
+          ? `Overwriting existing command-scoped rules for tool "task" on agent "${name}" with the restricted delegation rule`
+          : `Overwriting existing permission for tool "task" on agent "${name}" with the restricted delegation rule`,
+      },
+    })
+    permission.task = rule
+  } else if (existingTask === undefined) {
+    permission.task = rule
+  }
+  entry.permission = permission
 }
 
 export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
@@ -291,6 +556,10 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
     const message = error instanceof Error ? error.message : `[${PLUGIN_ID}] Invalid plugin options.`
     await client.app.log({ body: { service: PLUGIN_ID, level: "error", message } })
     throw error
+  }
+
+  const log: LogFn = async (entry) => {
+    await client.app.log(entry)
   }
 
   return {
@@ -312,26 +581,30 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           return agent[name]
         }
 
-        const inScope = (name: string, def: AgentLike | undefined) =>
-          !KNOWN_BUILTINS.includes(name) &&
-          !def?.disable &&
-          isSubagentLike(def) &&
-          name !== opts.orchestratorAgent
+        const levels = orchestratorLevels(opts)
+        const levelNames = new Set(levels)
 
-        if (getAgent(opts.orchestratorAgent)?.disable) {
-          await client.app.log({
-            body: {
-              service: PLUGIN_ID,
-              level: "error",
-              message: `The orchestrator agent \`${opts.orchestratorAgent}\` is disabled; plugin will not apply its configuration.`,
-            },
-          })
-          return
+        const inScope = (name: string, def: AgentLike | undefined) =>
+          !KNOWN_BUILTINS.includes(name) && !def?.disable && isSubagentLike(def) && !levelNames.has(name)
+
+        // Every orchestrator level must be enabled; a disabled level aborts
+        // the whole configuration (mirrors the single-orchestrator behavior).
+        for (const name of levels) {
+          if (getAgent(name)?.disable) {
+            await log({
+              body: {
+                service: PLUGIN_ID,
+                level: "error",
+                message: `The orchestrator agent \`${name}\` is disabled; plugin will not apply its configuration.`,
+              },
+            })
+            return
+          }
         }
 
         const blockedDirectiveTools = DIRECTIVE_TOOLS.filter((tool) => opts.blockedTools.includes(tool))
         if (blockedDirectiveTools.length > 0) {
-          await client.app.log({
+          await log({
             body: {
               service: PLUGIN_ID,
               level: "warn",
@@ -341,11 +614,26 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           })
         }
 
+        // A chain of depth N performs N-1 nested task hops, so opencode's
+        // `subagent_depth` (default 1) must be >= N. Warn before configuring
+        // anything so the user can fix opencode.json up front.
+        const subagentDepth = subagentDepthOf(cfg)
+        if (opts.orchestratorDepth > subagentDepth) {
+          await log({
+            body: {
+              service: PLUGIN_ID,
+              level: "warn",
+              message: `orchestratorDepth (${opts.orchestratorDepth}) exceeds opencode's subagent_depth (${subagentDepth}); set "subagent_depth": ${opts.orchestratorDepth} in opencode.json or delegation beyond the first hop will fail with "Subagent depth limit reached"`,
+              extra: { orchestratorDepth: opts.orchestratorDepth, subagentDepth },
+            },
+          })
+        }
+
         const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, ...Object.keys(agent)]
         const targets = [...new Set(candidates)].filter((name) => inScope(name, getAgent(name)))
 
         if (opts.agents !== undefined && !BUILTIN_SUBAGENTS.some((name) => targets.includes(name))) {
-          await client.app.log({
+          await log({
             body: {
               service: PLUGIN_ID,
               level: "warn",
@@ -363,7 +651,7 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           const existed = hasAgent(name)
           const def = ensureAgent(name)
           if (!existed && !BUILTIN_SUBAGENTS.includes(name) && !KNOWN_BUILTINS.includes(name)) {
-            await client.app.log({
+            await log({
               body: {
                 service: PLUGIN_ID,
                 level: "warn",
@@ -375,118 +663,92 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           if (!def.model) def.model = model
         }
 
-        // Configure the orchestrator: model, hard tool block, and the
-        // delegation directive as its system prompt.
-        const orchestratorExisted =
-          hasAgent(opts.orchestratorAgent) && getAgent(opts.orchestratorAgent) != null
-        const orchestrator = ensureAgent(opts.orchestratorAgent)
-        if (!orchestratorExisted) {
-          await client.app.log({
-            body: {
-              service: PLUGIN_ID,
-              level: "info",
-              message: `Creating orchestrator agent "${opts.orchestratorAgent}"`,
-            },
-          })
-        }
-        if (!orchestrator.description) {
-          orchestrator.description =
-            "Orchestrator agent: decomposes every request and delegates to subagents."
-        }
-        const previousMode = orchestrator.mode
-        if (orchestrator.mode !== "primary") {
-          orchestrator.mode = "primary"
-          if (previousMode !== undefined) {
-            await client.app.log({
+        // Configure every orchestrator level in the chain. Levels 1..N-1 may
+        // only delegate to the next level (structural task pinning);
+        // level N delegates to the routed subagents. Every level defaults to
+        // the orchestrator model (or its `orchestratorModels[i]` entry) and
+        // the blocked hands-on tools.
+        let topOrchestrator: AgentLike | undefined
+        const effectiveModels: string[] = []
+        for (let index = 0; index < levels.length; index += 1) {
+          const name = levels[index]
+          const level = index + 1
+          const depth = opts.orchestratorDepth
+          const isFinal = level === depth
+          // Per-level model resolution: `orchestratorModels[level - 1]` wins,
+          // then `orchestratorModel`, then the agent's existing/default model.
+          const levelModel = opts.orchestratorModels?.[level - 1] ?? opts.orchestratorModel
+
+          const existed = hasAgent(name) && getAgent(name) != null
+          const entry = ensureAgent(name)
+          if (index === 0) topOrchestrator = entry
+          if (!existed) {
+            await log({
               body: {
                 service: PLUGIN_ID,
-                level: "warn",
-                message: `Converting agent "${opts.orchestratorAgent}" mode "${previousMode}" to "primary" for orchestrator use`,
+                level: "info",
+                message: `Creating orchestrator agent "${name}"`,
               },
             })
           }
-        }
-        if (opts.orchestratorModel) orchestrator.model = opts.orchestratorModel
-        if (opts.blockedTools.length > 0) {
-          const rawPermission = orchestrator.permission
-          let permission: Record<string, unknown>
-          if (!isRecord(rawPermission)) {
-            await client.app.log({
-              body: {
-                service: PLUGIN_ID,
-                level: "warn",
-                message: `Orchestrator agent "${opts.orchestratorAgent}" has a non-object permission; replacing it with an empty permission object`,
-              },
-            })
-            permission = {}
-          } else {
-            permission = { ...rawPermission }
+          if (!entry.description) {
+            entry.description =
+              level === 1
+                ? "Orchestrator agent: decomposes every request and delegates to subagents."
+                : isFinal
+                  ? `Orchestrator agent (level ${level}/${depth}): decomposes requests from the level above and delegates to the routed subagents.`
+                  : `Orchestrator agent (level ${level}/${depth}): decomposes requests from the level above and delegates to the next level.`
           }
-          for (const tool of opts.blockedTools) {
-            if (permission[tool] !== undefined && permission[tool] !== "deny") {
-              await client.app.log({
+          const targetMode = level === 1 ? "primary" : "subagent"
+          const previousMode = entry.mode
+          if (entry.mode !== targetMode) {
+            entry.mode = targetMode
+            if (previousMode !== undefined) {
+              await log({
                 body: {
                   service: PLUGIN_ID,
                   level: "warn",
-                  message: isRecord(permission[tool])
-                    ? `Overwriting existing command-scoped rules for tool "${tool}" on agent "${opts.orchestratorAgent}" with blanket "deny"`
-                    : `Overwriting existing permission for tool "${tool}" on agent "${opts.orchestratorAgent}" with "deny"`,
+                  message: `Converting agent "${name}" mode "${previousMode}" to "${targetMode}" for orchestrator use`,
                 },
               })
             }
-            permission[tool] = "deny"
           }
-          orchestrator.permission = permission
-        }
-        if (opts.restrictTask && targets.length > 0) {
-          const taskRule = taskRuleFor(targets)
-          const rawPermission = orchestrator.permission
-          let permission: Record<string, unknown>
-          if (!isRecord(rawPermission)) {
-            await client.app.log({
-              body: {
-                service: PLUGIN_ID,
-                level: "warn",
-                message: `Orchestrator agent "${opts.orchestratorAgent}" has a non-object permission; replacing it with an empty permission object`,
-              },
-            })
-            permission = {}
+          if (levelModel) entry.model = levelModel
+          await applyBlockedTools(entry, name, opts.blockedTools, log)
+          if (isFinal) {
+            if (opts.restrictTask && targets.length > 0) {
+              await applyTaskRule(entry, name, taskRuleFor(targets), log)
+            }
           } else {
-            permission = { ...rawPermission }
+            // Structural chain enforcement, independent of restrictTask.
+            await applyTaskRule(entry, name, taskRuleFor([levels[index + 1]]), log)
           }
-          const existingTask = permission.task
-          if (existingTask !== undefined && !sameTaskRule(existingTask, taskRule)) {
-            await client.app.log({
-              body: {
-                service: PLUGIN_ID,
-                level: "warn",
-                message: isRecord(existingTask)
-                  ? `Overwriting existing command-scoped rules for tool "task" on agent "${opts.orchestratorAgent}" with the restricted delegation rule`
-                  : `Overwriting existing permission for tool "task" on agent "${opts.orchestratorAgent}" with the restricted delegation rule`,
-              },
-            })
-            permission.task = taskRule
-          } else if (existingTask === undefined) {
-            permission.task = taskRule
+          const marker = levelDirectiveMarker(level, depth)
+          if (!entry.prompt?.includes(marker)) {
+            const directive = orchestratorDirective(
+              opts,
+              level,
+              depth,
+              isFinal ? undefined : levels[index + 1],
+            )
+            entry.prompt = entry.prompt ? `${entry.prompt}\n\n${directive}` : directive
           }
-          orchestrator.permission = permission
-        }
-        if (!orchestrator.prompt?.includes(DIRECTIVE_MARKER)) {
-          orchestrator.prompt = orchestrator.prompt
-            ? `${orchestrator.prompt}\n\n${orchestratorDirective(opts)}`
-            : orchestratorDirective(opts)
+          effectiveModels.push(levelModel ?? "(default)")
         }
 
-        await client.app.log({
+        await log({
           body: {
             service: PLUGIN_ID,
             level: "info",
             message: `Orchestrator "${opts.orchestratorAgent}" enabled; subagents -> ${opts.subagentModel}`,
             extra: {
               routedAgents: targets,
-              orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
+              orchestratorModel: topOrchestrator?.model ?? cfg.model ?? "(default)",
+              orchestratorModels: effectiveModels,
               blockedTools: [...opts.blockedTools],
               defaultAgent: defaultAgentOf(cfg),
+              orchestratorDepth: opts.orchestratorDepth,
+              orchestratorLevels: levels,
             },
           },
         })

@@ -32,6 +32,7 @@ type TestAgent = {
 type TestConfig = {
   model?: string
   default_agent?: unknown
+  subagent_depth?: unknown
   agent: Record<string, TestAgent>
 }
 
@@ -1038,4 +1039,395 @@ test("rendered directive matches the README fenced block byte-for-byte", async (
   // README block may have one before the closing fence. Everything else must
   // match exactly, so a drift in either file fails this test.
   assert.equal(rendered.replace(/\n+$/, ""), block.replace(/\n+$/, ""))
+})
+
+// ─── orchestratorDepth ───────────────────────────────────────────────────────
+
+// Hyphenated level names ("Manager-2") cannot use dot access, so read them
+// through a dynamic-key helper instead of literal bracket access.
+const agentEntry = (config: TestConfig, name: string): TestAgent => config.agent[name]
+
+const descriptionOf = (config: TestConfig, name: string): string => {
+  const description = config.agent[name]?.description
+  assert.equal(typeof description, "string", `agent "${name}" description should be a string`)
+  return description as string
+}
+
+const creationLogs = (logs: LogEntry[]) =>
+  logs.filter(
+    (entry) => entry.body.level === "info" && entry.body.message.startsWith("Creating orchestrator agent"),
+  )
+
+test("orchestratorDepth 2 creates a Manager -> Manager-2 chain with structural task pinning", async () => {
+  const { config, logs } = await apply(
+    {
+      subagentModel: "fallback/model",
+      orchestratorModel: "orchestrator/model",
+      orchestratorDepth: 2,
+    },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.Manager.mode, "primary")
+  assert.equal(agentEntry(config, "Manager-2").mode, "subagent")
+  assert.deepEqual(config.agent.Manager.permission, {
+    edit: "deny",
+    bash: "deny",
+    task: { "*": "deny", "Manager-2": "allow" },
+  })
+  assert.deepEqual(agentEntry(config, "Manager-2").permission, { edit: "deny", bash: "deny" })
+  assert.equal(agentEntry(config, "Manager-2").model, "orchestrator/model")
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore"])
+  assert.equal(summaryLog(logs)?.body.extra?.orchestratorDepth, 2)
+  assert.deepEqual(summaryLog(logs)?.body.extra?.orchestratorLevels, ["Manager", "Manager-2"])
+
+  // Level 1 keeps the level-1 marker exactly; the deeper level gets its own
+  // level marker, references the chain, and neither prompt has duplicates.
+  const managerPrompt = promptOf(config, "Manager")
+  const manager2Prompt = promptOf(config, "Manager-2")
+  assert.match(managerPrompt, /# Orchestrator Mode \(enforced by @beremaran\/opencode-agent-tree\)/)
+  assert.match(
+    manager2Prompt,
+    /# Orchestrator Mode \(level 2\/2, enforced by @beremaran\/opencode-agent-tree\)/,
+  )
+  assert.match(managerPrompt, /ONLY to `Manager-2`/)
+  assert.equal((managerPrompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal((manager2Prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+})
+
+test("orchestratorDepth 3 creates a three-level chain; only the final level delegates to workers", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "fallback/model", orchestratorDepth: 3 },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.Manager.mode, "primary")
+  assert.equal(agentEntry(config, "Manager-2").mode, "subagent")
+  assert.equal(agentEntry(config, "Manager-3").mode, "subagent")
+  assert.deepEqual(permissionOf(config, "Manager").task, { "*": "deny", "Manager-2": "allow" })
+  assert.deepEqual(permissionOf(config, "Manager-2").task, { "*": "deny", "Manager-3": "allow" })
+  assert.equal(permissionOf(config, "Manager-3").task, undefined)
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore"])
+
+  // Workers keep their tools: the plugin never touches their permission.
+  assert.equal(config.agent.general.permission, undefined)
+  assert.equal(config.agent.explore.permission, undefined)
+
+  const managerPrompt = promptOf(config, "Manager")
+  const manager2Prompt = promptOf(config, "Manager-2")
+  const manager3Prompt = promptOf(config, "Manager-3")
+  // Level 1 keeps the level-1 header exactly (its body states the level);
+  // deeper levels carry their own level marker.
+  assert.match(managerPrompt, /# Orchestrator Mode \(enforced by @beremaran\/opencode-agent-tree\)/)
+  assert.match(managerPrompt, /level 1 of 3 in a delegation chain/)
+  assert.match(manager2Prompt, /# Orchestrator Mode \(level 2\/3, enforced by/)
+  assert.match(manager3Prompt, /# Orchestrator Mode \(level 3\/3, enforced by/)
+  // Only the final level's directive mentions the worker subagents.
+  assert.equal(manager3Prompt.includes("## Default delegation"), true)
+  assert.equal(manager3Prompt.includes("`general`"), true)
+  assert.equal(managerPrompt.includes("general"), false)
+  assert.equal(manager2Prompt.includes("general"), false)
+  assert.equal(managerPrompt.includes("explore"), false)
+  assert.equal(manager2Prompt.includes("explore"), false)
+})
+
+test("orchestratorDepth 2 with restrictTask pins the final level to the routed workers", async () => {
+  const { config } = await apply(
+    { subagentModel: "fallback/model", orchestratorDepth: 2, restrictTask: true },
+    { agent: {} },
+  )
+
+  assert.deepEqual(permissionOf(config, "Manager").task, { "*": "deny", "Manager-2": "allow" })
+  assert.deepEqual(permissionOf(config, "Manager-2").task, {
+    "*": "deny",
+    general: "allow",
+    explore: "allow",
+  })
+})
+
+test("orchestrator level names are excluded from routing and never phantom-warned", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "fallback/model", orchestratorDepth: 2, agents: ["Manager-2", "worker"] },
+    { agent: { worker: { mode: "subagent" } } },
+  )
+
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["worker"])
+  assert.equal(config.agent.worker.model, "fallback/model")
+  assert.equal(warnMatching(logs, /unknown name/).length, 0)
+})
+
+test("agentModels entries for orchestrator level names are ignored", async () => {
+  const { config, logs } = await apply(
+    {
+      subagentModel: "fallback/model",
+      orchestratorModel: "orchestrator/model",
+      orchestratorDepth: 2,
+      agentModels: { "Manager-2": "x/y", worker: "special/model" },
+    },
+    { agent: { worker: { mode: "subagent" } } },
+  )
+
+  assert.equal(agentEntry(config, "Manager-2").model, "orchestrator/model")
+  assert.equal(config.agent.worker.model, "special/model")
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore", "worker"])
+})
+
+test("invalid orchestratorDepth values are rejected at the factory", async () => {
+  for (const orchestratorDepth of [0, -1, 1.5, "3", null]) {
+    const { input, logs } = createInput()
+    await assert.rejects(
+      () => OrchestratorPlugin(input, { subagentModel: "provider/model", orchestratorDepth }),
+      /orchestratorDepth/,
+    )
+    assert.equal(errorLogs(logs).length, 1)
+  }
+})
+
+test("re-running the config hook with orchestratorDepth 2 is idempotent", async () => {
+  const { config, hooks, logs } = await apply(
+    { subagentModel: "fallback/model", orchestratorDepth: 2 },
+    { agent: {} },
+  )
+
+  await hooks.config(config)
+
+  assert.equal((promptOf(config, "Manager").match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal((promptOf(config, "Manager-2").match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal(creationLogs(logs).length, 2)
+  assert.equal(warnMatching(logs, /Converting agent/).length, 0)
+})
+
+test("a disabled deeper orchestrator level logs an error and applies nothing", async () => {
+  const { input, logs } = createInput()
+  const hooks = await OrchestratorPlugin(input, {
+    subagentModel: "provider/model",
+    orchestratorDepth: 2,
+  })
+  const config: TestConfig = { agent: { "Manager-2": { disable: true } } }
+
+  await hooks.config?.(config as Config)
+
+  const errors = errorLogs(logs)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0].body.message, /orchestrator agent `Manager-2` is disabled/)
+  assert.equal(config.agent.Manager, undefined)
+  assert.equal(agentEntry(config, "Manager-2").mode, undefined)
+  assert.equal(agentEntry(config, "Manager-2").permission, undefined)
+  assert.equal(summaryLog(logs), undefined)
+})
+
+test("explicit orchestratorDepth 1 matches the default single-orchestrator behavior", async () => {
+  const explicit = await apply({ subagentModel: "provider/model", orchestratorDepth: 1 }, { agent: {} })
+  const implicit = await apply({ subagentModel: "provider/model" }, { agent: {} })
+
+  assert.equal(promptOf(explicit.config, "Manager"), promptOf(implicit.config, "Manager"))
+  assert.deepEqual(explicit.config.agent.Manager.permission, implicit.config.agent.Manager.permission)
+  assert.equal(explicit.config.agent["Manager-2"], undefined)
+  assert.equal(summaryLog(explicit.logs)?.body.message, summaryLog(implicit.logs)?.body.message)
+  assert.equal(summaryLog(explicit.logs)?.body.extra?.orchestratorDepth, 1)
+})
+
+test("custom orchestratorAgent with orchestratorDepth names levels base-2, base-3", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "fallback/model", orchestratorAgent: "lead", orchestratorDepth: 2 },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.lead.mode, "primary")
+  assert.equal(agentEntry(config, "lead-2").mode, "subagent")
+  assert.deepEqual(permissionOf(config, "lead").task, { "*": "deny", "lead-2": "allow" })
+  assert.deepEqual(summaryLog(logs)?.body.extra?.orchestratorLevels, ["lead", "lead-2"])
+})
+
+test("deeper orchestrator levels keep custom descriptions", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model", orchestratorDepth: 2 },
+    { agent: { "Manager-2": { mode: "subagent", description: "Custom level two" } } },
+  )
+
+  assert.equal(agentEntry(config, "Manager-2").description, "Custom level two")
+})
+
+test("deeper orchestrator levels get a default description when empty", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model", orchestratorDepth: 2 },
+    { agent: { "Manager-2": { mode: "subagent", description: "" } } },
+  )
+
+  assert.match(descriptionOf(config, "Manager-2"), /level 2\/2/)
+})
+
+test("a user-defined agent matching a deeper level name is taken over as that level", async () => {
+  const { config } = await apply(
+    {
+      subagentModel: "provider/model",
+      orchestratorModel: "orchestrator/model",
+      orchestratorDepth: 2,
+    },
+    { agent: { "Manager-2": { mode: "subagent", description: "Existing level two" } } },
+  )
+
+  assert.equal(agentEntry(config, "Manager-2").mode, "subagent")
+  assert.equal(agentEntry(config, "Manager-2").description, "Existing level two")
+  assert.equal(agentEntry(config, "Manager-2").model, "orchestrator/model")
+  assert.deepEqual(permissionOf(config, "Manager-2"), { edit: "deny", bash: "deny" })
+  assert.match(promptOf(config, "Manager-2"), /# Orchestrator Mode \(level 2\/2/)
+})
+
+// ─── orchestratorModels ──────────────────────────────────────────────────────
+
+test("orchestratorModels assigns per-level models with fallback to orchestratorModel", async () => {
+  const { config } = await apply(
+    {
+      subagentModel: "fallback/model",
+      orchestratorDepth: 3,
+      orchestratorModels: ["a/x", "b/y"],
+      orchestratorModel: "c/z",
+    },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.Manager.model, "a/x")
+  assert.equal(agentEntry(config, "Manager-2").model, "b/y")
+  assert.equal(agentEntry(config, "Manager-3").model, "c/z")
+})
+
+test("orchestratorModels overrides an existing orchestrator model unconditionally", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model", orchestratorModels: ["a/x"] },
+    { agent: { Manager: { mode: "primary", model: "old/x" } } },
+  )
+
+  assert.equal(config.agent.Manager.model, "a/x")
+})
+
+test("orchestratorModels partial fallback leaves missing levels unset", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model", orchestratorDepth: 2, orchestratorModels: ["a/x"] },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.Manager.model, "a/x")
+  assert.equal(agentEntry(config, "Manager-2").model, undefined)
+})
+
+test("empty orchestratorModels behaves exactly like not provided", async () => {
+  const { config } = await apply(
+    {
+      subagentModel: "provider/model",
+      orchestratorDepth: 2,
+      orchestratorModels: [],
+      orchestratorModel: "c/z",
+    },
+    { agent: {} },
+  )
+
+  assert.equal(config.agent.Manager.model, "c/z")
+  assert.equal(agentEntry(config, "Manager-2").model, "c/z")
+})
+
+test("invalid orchestratorModels are rejected at the factory", async () => {
+  for (const orchestratorModels of ["a/x", ["bad-model"], ["a/x", 42]]) {
+    const { input, logs } = createInput()
+    await assert.rejects(
+      () => OrchestratorPlugin(input, { subagentModel: "provider/model", orchestratorModels }),
+      /orchestratorModels/,
+    )
+    assert.equal(errorLogs(logs).length, 1)
+  }
+})
+
+test("orchestratorModels longer than orchestratorDepth is rejected at the factory", async () => {
+  const { input, logs } = createInput()
+
+  await assert.rejects(
+    () =>
+      OrchestratorPlugin(input, {
+        subagentModel: "provider/model",
+        orchestratorDepth: 2,
+        orchestratorModels: ["a/x", "b/y", "c/z"],
+      }),
+    /orchestratorModels.*orchestratorDepth/,
+  )
+  const error = errorLogs(logs)
+  assert.equal(error.length, 1)
+  assert.match(error[0].body.message, /has 3 entries but `orchestratorDepth` is 2/)
+})
+
+test("summary log reports the effective per-level orchestrator models", async () => {
+  const { logs } = await apply(
+    {
+      subagentModel: "provider/model",
+      orchestratorDepth: 2,
+      orchestratorModels: ["a/x"],
+      orchestratorModel: "c/z",
+    },
+    { agent: {} },
+  )
+
+  assert.deepEqual(summaryLog(logs)?.body.extra?.orchestratorModels, ["a/x", "c/z"])
+})
+
+test("summary log reports (default) for unset orchestrator models", async () => {
+  const { logs } = await apply({ subagentModel: "provider/model", orchestratorDepth: 2 }, { agent: {} })
+
+  assert.deepEqual(summaryLog(logs)?.body.extra?.orchestratorModels, ["(default)", "(default)"])
+})
+
+// ─── subagent_depth warning ──────────────────────────────────────────────────
+
+test("warns when orchestratorDepth exceeds the default subagent_depth of 1", async () => {
+  const { logs } = await apply({ subagentModel: "provider/model", orchestratorDepth: 2 }, { agent: {} })
+
+  const warnings = warnMatching(logs, /subagent_depth/)
+  assert.equal(warnings.length, 1)
+  assert.deepEqual(warnings[0].body.extra, { orchestratorDepth: 2, subagentDepth: 1 })
+})
+
+test("no subagent_depth warning when subagent_depth is sufficient", async () => {
+  const { logs } = await apply(
+    { subagentModel: "provider/model", orchestratorDepth: 2 },
+    { subagent_depth: 3, agent: {} },
+  )
+
+  assert.equal(warnMatching(logs, /subagent_depth/).length, 0)
+})
+
+test("warns when orchestratorDepth 3 exceeds subagent_depth 2", async () => {
+  const { logs } = await apply(
+    { subagentModel: "provider/model", orchestratorDepth: 3 },
+    { subagent_depth: 2, agent: {} },
+  )
+
+  const warnings = warnMatching(logs, /subagent_depth/)
+  assert.equal(warnings.length, 1)
+  assert.deepEqual(warnings[0].body.extra, { orchestratorDepth: 3, subagentDepth: 2 })
+})
+
+test("no subagent_depth warning for default orchestratorDepth 1", async () => {
+  const { logs } = await apply({ subagentModel: "provider/model" }, { agent: {} })
+
+  assert.equal(warnMatching(logs, /subagent_depth/).length, 0)
+})
+
+test("a string subagent_depth is treated as unset for the warning", async () => {
+  const { logs } = await apply(
+    { subagentModel: "provider/model", orchestratorDepth: 2 },
+    { subagent_depth: "3", agent: {} },
+  )
+
+  const warnings = warnMatching(logs, /subagent_depth/)
+  assert.equal(warnings.length, 1)
+  assert.deepEqual(warnings[0].body.extra, { orchestratorDepth: 2, subagentDepth: 1 })
+})
+
+test("explicit subagent_depth 0 warns even for orchestratorDepth 1", async () => {
+  const { logs } = await apply(
+    { subagentModel: "provider/model", orchestratorDepth: 1 },
+    { subagent_depth: 0, agent: {} },
+  )
+
+  const warnings = warnMatching(logs, /subagent_depth/)
+  assert.equal(warnings.length, 1)
+  assert.deepEqual(warnings[0].body.extra, { orchestratorDepth: 1, subagentDepth: 0 })
 })

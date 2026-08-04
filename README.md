@@ -115,7 +115,9 @@ summary entry's extra metadata) so you can confirm which mode a session runs in.
 | `subagentModel`     | `string`             | **required**                     | Model for all delegated work, e.g. `"anthropic/claude-sonnet-4-6"`. Must be `provider/model` format. Agents with an explicit `model` in `opencode.json` are never overridden. See [Model precedence](#model-precedence). |
 | `orchestratorModel` | `string`             | agent model, else `model`        | Model for the orchestrator itself. Unconditionally overrides an explicit model on the orchestrator agent. |
 | `orchestratorAgent` | `string`             | `"Manager"`                      | Which agent acts as the orchestrator. Created by the plugin if it does not exist (it shows up in the agent picker under this name). If you name an existing agent, the plugin **converts it** to a primary agent: its `mode` is set to `"primary"` unconditionally, and a warning is logged if it previously had an explicit non-primary mode. Built-in primary agents are left untouched by default. |
-| `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. Disabled agents, primary-mode agents, the built-in primaries (`build`, `plan`, `compaction`, `title`, `summary`), and the orchestrator itself are filtered out even if listed — none of them are ever routed to `subagentModel`, and they never trigger the phantom-name warning. |
+| `orchestratorDepth` | `number`             | `1`                              | How many orchestrator levels form the delegation chain. With `N`, the levels are `<orchestratorAgent>`, `<orchestratorAgent>-2`, ..., `<orchestratorAgent>-N`. Intermediate levels can only delegate to the next level (their `task` permission is structurally pinned); only the final level's subagents (`general`, `explore`) have hands-on tools. Every level defaults to `orchestratorModel` (or a per-level `orchestratorModels` entry) and the blocked hands-on tools. Must be a positive integer. See [Deep orchestration](#deep-orchestration). |
+| `orchestratorModels` | `string[]`           | —                                | Per-level orchestrator models. Entry `i` applies to level `i+1` (`[0]` → "Manager", `[1]` → "Manager-2", ...). A shorter array leaves deeper levels on `orchestratorModel`. Entries must be `provider/model` format; length must not exceed `orchestratorDepth`. |
+| `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. Disabled agents, primary-mode agents, the built-in primaries (`build`, `plan`, `compaction`, `title`, `summary`), and the orchestrator level agents are filtered out even if listed — none of them are ever routed to `subagentModel`, and they never trigger the phantom-name warning. |
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. Never applies to the orchestrator agent (it is never routed). |
 | `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
 | `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. Names must match `[a-z0-9_-]+`. |
@@ -144,10 +146,64 @@ The orchestrator is asymmetric:
 
 - `orchestratorModel` **unconditionally** overrides an explicit `model` on the
   orchestrator agent.
-- An `agentModels` entry keyed to the orchestrator agent name is silently
-  ignored — the orchestrator is never routed.
+- With `orchestratorDepth > 1`, each level's model resolves as
+  `orchestratorModels[i]` → `orchestratorModel` → the level agent's
+  existing/default model. `orchestratorModels[0]` is the top level (e.g.
+  "Manager"), `orchestratorModels[1]` is "Manager-2", and so on; a level
+  without an array entry falls back to `orchestratorModel`.
+- `agentModels` is **never** applied to orchestrator levels — per-level
+  orchestrator models come from `orchestratorModels`, not `agentModels`.
+- An `agentModels` entry keyed to an orchestrator agent name is silently
+  ignored — orchestrator levels are never routed.
 - Built-in primary agents (`build`, `plan`, `compaction`, `title`, `summary`)
   are never routed either, so `agentModels` entries for them are never applied.
+
+## Deep orchestration
+
+With `orchestratorDepth: 1` (the default) a single orchestrator delegates
+directly to the routed subagents:
+
+```
+user prompt -> Manager -> general / explore (hands-on tools)
+```
+
+With `orchestratorDepth: N` the plugin creates a strict chain of N
+orchestrator-only agents. Level 1 is `<orchestratorAgent>` (a primary agent
+you interact with), and each further level is named
+`<orchestratorAgent>-<i>` (a subagent). Only the final level delegates to the
+routed subagents; every orchestrator level has hands-on tools denied.
+
+```
+orchestratorDepth: 3
+
+user prompt -> Manager -> Manager-2 -> Manager-3 -> general / explore (hands-on tools)
+```
+
+Enforcement in the chain:
+
+- **Intermediate levels (1..N-1) are structurally pinned to the next level.**
+  Their `permission.task` is always `{ "*": "deny", "<next-level>": "allow" }`
+  — regardless of `restrictTask` — so they physically cannot delegate to
+  workers or any other agent. Their directive instructs them to decompose the
+  request from the level above, delegate every subtask only to the next level,
+  and never do hands-on work.
+- **`restrictTask` still controls the final level.** Level N delegates to the
+  routed subagents; `restrictTask: true` pins its `task` permission to exactly
+  those routed targets (`general`, `explore`, ...). Without it, the final
+  level's directive guides delegation but its `task` permission is not pinned.
+- **Every level defaults to `orchestratorModel`** and the blocked hands-on
+  tools, unless a per-level `orchestratorModels[i]` entry overrides its model;
+  all level agents appear in the agent picker/`/agent`.
+
+**Cost caveat:** every added level multiplies LLM model calls and tokens —
+each level re-plans, writes briefs, and reviews the level below it. Depth 3+
+should be reserved for genuinely large decompositions, and each level should
+be pointed at a model cheap enough to justify the overhead.
+
+**opencode nesting limit:** opencode's `subagent_depth` config controls how
+deeply subagents can spawn further subagents (default `1`). A chain of depth
+`N` performs `N-1` nested `task` hops, so it requires
+`subagent_depth >= N` in `opencode.json` — see [Limitations](#limitations).
 
 ## Example
 
@@ -174,6 +230,59 @@ The orchestrator is asymmetric:
 > `provider/model` IDs that exist in your opencode setup (check your configured
 > providers or `opencode models`).
 
+Deep orchestration with a three-level chain (requires
+`"subagent_depth": 3` — see [Limitations](#limitations)):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "Manager",
+  "subagent_depth": 3,
+  "plugin": [
+    [
+      "@beremaran/opencode-agent-tree",
+      {
+        "subagentModel": "anthropic/claude-haiku-4-5",
+        "orchestratorModel": "anthropic/claude-sonnet-4-5",
+        "orchestratorDepth": 3,
+        "restrictTask": true
+      }
+    ]
+  ]
+}
+```
+
+This creates `Manager`, `Manager-2`, and `Manager-3`. `Manager` and
+`Manager-2` can only delegate to the next level; `Manager-3` delegates to
+`general`/`explore` (and, with `restrictTask`, to nothing else).
+
+Per-level models keep deep chains affordable — point the top level at the
+strongest model and drop to cheaper models deeper in the chain
+(`orchestratorModels[0]` = "Manager", `[1]` = "Manager-2", ...). Levels
+without an entry fall back to `orchestratorModel`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "Manager",
+  "subagent_depth": 3,
+  "plugin": [
+    [
+      "@beremaran/opencode-agent-tree",
+      {
+        "subagentModel": "anthropic/claude-haiku-4-5",
+        "orchestratorDepth": 3,
+        "orchestratorModels": [
+          "anthropic/claude-opus-4-5",
+          "anthropic/claude-sonnet-4-5",
+          "anthropic/claude-haiku-4-5"
+        ]
+      }
+    ]
+  ]
+}
+```
+
 ## Validation & warnings
 
 At startup the plugin validates the configuration and reports self-contradictory
@@ -194,6 +303,9 @@ Everything else logs a `warn` message and continues.
 | --------- | ------ |
 | The orchestrator agent named by `orchestratorAgent` is disabled | Error logged; the plugin's config is **not applied**; opencode continues with the original config |
 | `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (exactly one `/`, non-empty on both sides, no whitespace; dots, dashes, underscores, and colons are allowed in the model part, but not further slashes) | Config error, plugin load aborts |
+| `orchestratorDepth` is not a positive integer (`0`, `-1`, `1.5`, `"3"`, `null`, `NaN`) | Config error, plugin load aborts |
+| `orchestratorModels` has more entries than `orchestratorDepth`, or an entry is not `provider/model` format | Config error, plugin load aborts (the length error names both options) |
+| `orchestratorDepth` exceeds opencode's `subagent_depth` (default `1`) | Warning naming both values and the fix: set `"subagent_depth": N` in `opencode.json`, or delegation beyond the first hop fails with `Subagent depth limit reached` |
 | A `blockedTools` name does not match `[a-z0-9_-]+` (lowercase letters, digits, underscore, hyphen) | Config error, plugin load aborts |
 | `blockedTools` includes a directive-dependent tool (`task`, `todowrite`, `question`, `read`, `glob`, `grep`, `webfetch`, `websearch`) | Warning: the orchestrator is told to delegate with a tool it cannot use |
 | A blocked tool's existing permission on the orchestrator agent is a plain value other than `deny` and is overwritten with `deny` | Warning naming the tool and agent (an existing value that is already `deny` is not warned about) |
@@ -222,6 +334,12 @@ the configuration it runs with. Only use this plugin with config you control.
   allows `task` toward the plugin's routed delegation targets (`task` is denied
   for everything else), so it physically cannot delegate to an unrestricted
   agent.
+- **Intermediate chain levels cannot delegate to arbitrary agents — even
+  without `restrictTask`.** With `orchestratorDepth > 1`, every intermediate
+  level's `task` permission is structurally pinned to `{ "*": "deny",
+  "<next-level>": "allow" }`, so a misbehaving intermediate prompt cannot
+  delegate to an unrestricted agent. The final level still needs
+  `restrictTask: true` to close the same loophole for the worker hop.
 - **`orchestratorModel` can override an explicitly configured model** on the
   orchestrator agent.
 
@@ -235,6 +353,18 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 - The `task` tool is assumed to be available to the orchestrator.
 - Once work is delegated to a subagent, the plugin cannot stop it from doing
   that work.
+- **Each added orchestrator level multiplies LLM cost and latency.** Every
+  level re-plans the request, writes briefs, and reviews the level below it, so
+  `orchestratorDepth: N` performs roughly N times the orchestrator-level model
+  calls of depth 1.
+- **opencode itself limits agent nesting via `subagent_depth`.** opencode's
+  `subagent_depth` option (default `1`) controls how deeply subagents can spawn
+  further subagents: with the default, "primary agents can launch subagents but
+  prevents those subagents from launching additional subagents" (per opencode's
+  config docs). A delegation chain of depth `N` needs `N-1` nested `task`
+  hops, so it requires `"subagent_depth": N` (e.g. `3` for
+  `orchestratorDepth: 3`) in `opencode.json`. Without it, the final hop fails
+  with `Subagent depth limit reached` at runtime.
 - Supported opencode range: `>=1.18.11 <2` (per `peerDependencies`).
 
 ## Troubleshooting
@@ -253,6 +383,17 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 - **A warning you did not expect** — the warning cases above log at `warn`
   level naming the offending tool, agent, or config value; the config is
   probably not doing what you intend.
+- **With `orchestratorDepth > 1`, `Manager-2`/`Manager-3` show up in the agent
+  picker (`/agent`).** That is expected: every orchestrator level is a real
+  agent entry, defaults to `orchestratorModel` (or its `orchestratorModels[i]`
+  entry), and has its hands-on tools denied. All level names are excluded from
+  routing, so they never receive `subagentModel` and never trigger phantom-name
+  warnings.
+- **`orchestratorDepth (N) exceeds opencode's subagent_depth (M)`** means your
+  chain is deeper than opencode allows subagents to nest (default `1`). Fix it
+  by setting `"subagent_depth": N` in `opencode.json` (or lowering
+  `orchestratorDepth`). Without it, delegation beyond the first hop fails at
+  runtime with `Subagent depth limit reached`.
 - **"My explicitly-configured agent model is not used"** — for the orchestrator
   this is expected: `orchestratorModel` unconditionally overrides it, and
   `agentModels` entries keyed to it are ignored. For subagents, an explicit
@@ -264,7 +405,9 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 ## Notes
 
 - Subagents keep their default tools; only the orchestrator is restricted. Switch to the `plan` agent or another primary anytime.
-- The directive is installed on the orchestrator agent only — subagents never receive it.
+- The directive is installed on orchestrator level agents only (level 1 and,
+  with `orchestratorDepth > 1`, the `-2`/`-3`/... levels) — worker subagents
+  (`general`, `explore`) never receive it.
 - The directive is appended only once: the `# Orchestrator Mode` marker in the
   prompt prevents re-appending if the config hook re-runs or opencode reloads
   the plugin. This is deliberate.
