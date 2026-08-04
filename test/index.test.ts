@@ -675,7 +675,7 @@ test("restrictTask warns when overwriting an existing task rule", async () => {
 
   const overwrite = warnMatching(logs, /Overwriting existing permission for tool "task"/)
   assert.equal(overwrite.length, 1)
-  assert.match(overwrite[0].body.message, /restricted delegation rule/)
+  assert.match(overwrite[0].body.message, /delegation rule/)
   assert.deepEqual(permissionOf(config, "Manager").task, {
     "*": "deny",
     general: "allow",
@@ -1075,7 +1075,12 @@ test("orchestratorDepth 2 creates a Manager -> Manager-2 chain with structural t
     bash: "deny",
     task: { "*": "deny", "Manager-2": "allow" },
   })
-  assert.deepEqual(agentEntry(config, "Manager-2").permission, { edit: "deny", bash: "deny" })
+  assert.deepEqual(agentEntry(config, "Manager-2").permission, {
+    edit: "deny",
+    bash: "deny",
+    task: { "*": "allow" },
+    todowrite: { "*": "allow" },
+  })
   assert.equal(agentEntry(config, "Manager-2").model, "orchestrator/model")
   assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore"])
   assert.equal(summaryLog(logs)?.body.extra?.orchestratorDepth, 2)
@@ -1106,7 +1111,13 @@ test("orchestratorDepth 3 creates a three-level chain; only the final level dele
   assert.equal(agentEntry(config, "Manager-3").mode, "subagent")
   assert.deepEqual(permissionOf(config, "Manager").task, { "*": "deny", "Manager-2": "allow" })
   assert.deepEqual(permissionOf(config, "Manager-2").task, { "*": "deny", "Manager-3": "allow" })
-  assert.equal(permissionOf(config, "Manager-3").task, undefined)
+  // The final level is a subagent, so it must declare a task rule or opencode
+  // hides the task tool from it entirely; a blanket allow keeps delegation
+  // working under the default prompt-only enforcement.
+  assert.deepEqual(permissionOf(config, "Manager-3").task, { "*": "allow" })
+  // Subagent levels must also declare todowrite or opencode strips it.
+  assert.deepEqual(permissionOf(config, "Manager-2").todowrite, { "*": "allow" })
+  assert.deepEqual(permissionOf(config, "Manager-3").todowrite, { "*": "allow" })
   assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore"])
 
   // Workers keep their tools: the plugin never touches their permission.
@@ -1143,6 +1154,35 @@ test("orchestratorDepth 2 with restrictTask pins the final level to the routed w
     general: "allow",
     explore: "allow",
   })
+  assert.deepEqual(permissionOf(config, "Manager-2").todowrite, { "*": "allow" })
+})
+
+test("chain final levels always get a task rule so the task tool is never stripped", async () => {
+  const { config, hooks, logs } = await apply(
+    { subagentModel: "fallback/model", orchestratorDepth: 3 },
+    { agent: {} },
+  )
+
+  // Intermediate levels stay structurally pinned to the next level...
+  assert.deepEqual(permissionOf(config, "Manager-2").task, { "*": "deny", "Manager-3": "allow" })
+  // ...and the final level gets a task rule even without restrictTask.
+  assert.deepEqual(permissionOf(config, "Manager-3").task, { "*": "allow" })
+  for (const name of ["Manager-2", "Manager-3"]) {
+    assert.deepEqual(permissionOf(config, name).todowrite, { "*": "allow" })
+  }
+
+  // Re-running the config hook keeps the rules idempotent.
+  await hooks.config(config)
+  assert.deepEqual(permissionOf(config, "Manager-3").task, { "*": "allow" })
+  assert.deepEqual(permissionOf(config, "Manager-2").task, { "*": "deny", "Manager-3": "allow" })
+  assert.equal(warnMatching(logs, /Overwriting existing permission for tool/).length, 0)
+})
+
+test("depth-1 orchestrators are untouched: no task rule without restrictTask, no todowrite rule", async () => {
+  const { config } = await apply({ subagentModel: "fallback/model", orchestratorDepth: 1 }, { agent: {} })
+
+  assert.equal(permissionOf(config, "Manager").task, undefined)
+  assert.equal(permissionOf(config, "Manager").todowrite, undefined)
 })
 
 test("orchestrator level names are excluded from routing and never phantom-warned", async () => {
@@ -1270,7 +1310,12 @@ test("a user-defined agent matching a deeper level name is taken over as that le
   assert.equal(agentEntry(config, "Manager-2").mode, "subagent")
   assert.equal(agentEntry(config, "Manager-2").description, "Existing level two")
   assert.equal(agentEntry(config, "Manager-2").model, "orchestrator/model")
-  assert.deepEqual(permissionOf(config, "Manager-2"), { edit: "deny", bash: "deny" })
+  assert.deepEqual(permissionOf(config, "Manager-2"), {
+    edit: "deny",
+    bash: "deny",
+    task: { "*": "allow" },
+    todowrite: { "*": "allow" },
+  })
   assert.match(promptOf(config, "Manager-2"), /# Orchestrator Mode \(level 2\/2/)
 })
 

@@ -121,7 +121,7 @@ summary entry's extra metadata) so you can confirm which mode a session runs in.
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. Never applies to the orchestrator agent (it is never routed). |
 | `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
 | `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. Names must match `[a-z0-9_-]+`. |
-| `restrictTask`      | `boolean`            | `false`                          | When `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents. Closes the "delegate to an unrestricted agent" loophole (see [Security](#security)). |
+| `restrictTask`      | `boolean`            | `false`                          | When `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents. Closes the "delegate to an unrestricted agent" loophole (see [Security](#security)). Without it, single-level orchestrators have no `task` rule, while final levels of chains (`orchestratorDepth > 1`) get a blanket `task: { "*": "allow" }` — required so opencode does not strip the `task` tool from the subagent session. |
 
 ### Permission keys gate tool families
 
@@ -187,10 +187,16 @@ Enforcement in the chain:
   workers or any other agent. Their directive instructs them to decompose the
   request from the level above, delegate every subtask only to the next level,
   and never do hands-on work.
-- **`restrictTask` still controls the final level.** Level N delegates to the
-  routed subagents; `restrictTask: true` pins its `task` permission to exactly
-  those routed targets (`general`, `explore`, ...). Without it, the final
-  level's directive guides delegation but its `task` permission is not pinned.
+- **`restrictTask` controls the final level's task pinning.** Level N
+  delegates to the routed subagents. `restrictTask: true` pins its `task`
+  permission to exactly those routed targets (`general`, `explore`, ...);
+  without it, the final level gets a blanket `task: { "*": "allow" }` rule so
+  its directive guides delegation without pinning. Either way the final level
+  of a chain **must** declare a `task` permission: opencode injects
+  `task: deny *` into the session of any subagent that declares no task rule,
+  which removes the `task` tool from its toolset entirely (delegation becomes
+  impossible — the model sees "unavailable tool 'task'"). Subagent levels also
+  declare `todowrite` for the same reason.
 - **Every level defaults to `orchestratorModel`** and the blocked hands-on
   tools, unless a per-level `orchestratorModels[i]` entry overrides its model;
   all level agents appear in the agent picker/`/agent`.
@@ -339,7 +345,9 @@ the configuration it runs with. Only use this plugin with config you control.
   level's `task` permission is structurally pinned to `{ "*": "deny",
   "<next-level>": "allow" }`, so a misbehaving intermediate prompt cannot
   delegate to an unrestricted agent. The final level still needs
-  `restrictTask: true` to close the same loophole for the worker hop.
+  `restrictTask: true` to close the same loophole for the worker hop (without
+  it, its `task` permission is a blanket `{ "*": "allow" }`, which keeps the
+  tool available but does not restrict delegation).
 - **`orchestratorModel` can override an explicitly configured model** on the
   orchestrator agent.
 

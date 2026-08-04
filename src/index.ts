@@ -522,28 +522,34 @@ const applyBlockedTools = async (
   entry.permission = permission
 }
 
-/** Sets (or preserves) the agent's `task` permission rule, warning on clobber. */
+/**
+ * Sets (or preserves) the agent's permission rule for `toolName` (default
+ * `task`), warning on clobber. Rule values are always the object form
+ * `{ "<target>": "allow" | "deny" }` so opencode's `fromConfig` expansion
+ * keeps them idempotent under `sameTaskRule`.
+ */
 const applyTaskRule = async (
   entry: AgentLike,
   name: string,
   rule: Record<string, "deny" | "allow">,
   log: LogFn,
+  toolName = "task",
 ): Promise<void> => {
   const permission = await permissionFor(entry, name, log)
-  const existingTask = permission.task
-  if (existingTask !== undefined && !sameTaskRule(existingTask, rule)) {
+  const existing = permission[toolName]
+  if (existing !== undefined && !sameTaskRule(existing, rule)) {
     await log({
       body: {
         service: PLUGIN_ID,
         level: "warn",
-        message: isRecord(existingTask)
-          ? `Overwriting existing command-scoped rules for tool "task" on agent "${name}" with the restricted delegation rule`
-          : `Overwriting existing permission for tool "task" on agent "${name}" with the restricted delegation rule`,
+        message: isRecord(existing)
+          ? `Overwriting existing command-scoped rules for tool "${toolName}" on agent "${name}" with the delegation rule`
+          : `Overwriting existing permission for tool "${toolName}" on agent "${name}" with the delegation rule`,
       },
     })
-    permission.task = rule
-  } else if (existingTask === undefined) {
-    permission.task = rule
+    permission[toolName] = rule
+  } else if (existing === undefined) {
+    permission[toolName] = rule
   }
   entry.permission = permission
 }
@@ -716,12 +722,27 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           if (levelModel) entry.model = levelModel
           await applyBlockedTools(entry, name, opts.blockedTools, log)
           if (isFinal) {
-            if (opts.restrictTask && targets.length > 0) {
-              await applyTaskRule(entry, name, taskRuleFor(targets), log)
+            // The final level of a chain with depth >= 2 runs as a subagent.
+            // opencode injects `task: deny *` into the session of any
+            // subagent whose own permission declares no task rule, and a
+            // blanket deny hides the task tool from the model entirely — so
+            // without an explicit rule the final orchestrator cannot delegate
+            // at all. `restrictTask` pins the rule to the routed targets;
+            // otherwise a blanket allow preserves the documented prompt-only
+            // enforcement while keeping the tool available.
+            const pinToTargets = opts.restrictTask && targets.length > 0
+            if (depth > 1 || pinToTargets) {
+              await applyTaskRule(entry, name, pinToTargets ? taskRuleFor(targets) : { "*": "allow" }, log)
             }
           } else {
             // Structural chain enforcement, independent of restrictTask.
             await applyTaskRule(entry, name, taskRuleFor([levels[index + 1]]), log)
+          }
+          if (level > 1) {
+            // opencode strips todowrite from subagent sessions the same way
+            // it strips task; every level's directive relies on it to track
+            // subtasks, so subagent levels must declare it explicitly.
+            await applyTaskRule(entry, name, { "*": "allow" }, log, "todowrite")
           }
           const marker = levelDirectiveMarker(level, depth)
           if (!entry.prompt?.includes(marker)) {
