@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 - 2026-08-04
+
+### Fixed
+
+- Chains (`orchestratorDepth > 1`) no longer break at the final level: opencode injects `task: deny *` into the session of any subagent that declares no `task` permission, and a blanket deny removes the `task` tool from the model's toolset entirely — the final orchestrator then fails with "Model tried to call unavailable tool 'task'" and is left with only read-only tools. The final level of a chain now always declares a `task` permission (pinned to the routed targets with `restrictTask: true`, blanket `{ "*": "allow" }` otherwise), and subagent levels declare `todowrite` the same way so it is not stripped either. Single-level (`orchestratorDepth: 1`) behavior is unchanged.
+
 ## 0.6.0 - 2026-08-04
 
 ### Changed
