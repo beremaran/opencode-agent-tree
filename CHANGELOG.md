@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
 
 ### Changed
 
@@ -9,6 +9,10 @@
 - The config hook no longer throws: a disabled orchestrator agent logs an error and the plugin's configuration is not applied, but opencode continues with the original config. Factory-level invalid options still raise a config error that aborts plugin load.
 - Permission merging is hardened: overwriting an existing non-`deny` plain permission warns; command-scoped (object) rules replaced by a blanket `deny` warn separately; values already set to `deny` are not re-warned; and a non-object `permission` is replaced with an empty object (with a warning).
 - The startup summary log now reports the effective `defaultAgent` in its extra metadata.
+- Unexpected-error logging is clearer: factory and config-hook failures log the actual error message before rethrowing/surfacing.
+- Model ID validation is stricter, rejecting malformed `provider/model` values consistently across `subagentModel`, `orchestratorModel`, and `agentModels`.
+- The `default_agent` summary-log reporting is hardened against non-string and missing config values.
+- Docs, packaging, and CI hardening: raw-TypeScript runtime note, permission-key family mapping note, and illustrative model IDs in the README; `main`/`types` prefixes normalized in `package.json`; `.gitignore` now covers `.DS_Store`, `.env*`, `pack-info.json`, and `*.tsbuildinfo`.
 
 ### Fixed
 
@@ -25,6 +29,10 @@
 - Dependabot batching (`open-pull-requests-limit: 5` and update groups), and `*.tgz` in `.gitignore`.
 - The publish workflow verifies the CHANGELOG entry for the released version, asserts the packed file list, smoke-tests the tarball from a clean consumer install, and creates a GitHub Release from the CHANGELOG section.
 - Tests were converted to TypeScript and expanded to cover the new routing, conversion, permission, and config-hook behaviors.
+- The orchestrator agent now gets a default description.
+- New `restrictTask` option: when `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents (closes the "delegate to an unrestricted agent" loophole).
+- GitHub issue templates (`bug_report`, `feature_request`) and a pull request template.
+- `npm run test:coverage` script, and `CHANGELOG.md` included in the published package `files`.
 
 ## 0.5.0 - 2026-08-04
 

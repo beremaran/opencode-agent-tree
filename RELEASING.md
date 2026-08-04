@@ -10,7 +10,7 @@ npm (with provenance) and creates the GitHub Release.
    `package-lock.json` is updated by `npm install` or `npm version`).
 
 2. **Add a CHANGELOG entry.** Create a new `## X.Y.Z - YYYY-MM-DD` heading at
-   the top of `CHANGELOG.md` (above `## Unreleased`, or move the Unreleased
+   the top of `CHANGELOG.md` (above `## [Unreleased]`, or move the Unreleased
    content into it). Group changes under `### Added`, `### Fixed`, and
    `### Changed`. For **breaking** changes in 0.x — anything that changes
    default behavior for existing users — use `### Changed (Breaking)`.
@@ -45,3 +45,6 @@ npm (with provenance) and creates the GitHub Release.
   the tag flow.
 - "Unreleased" entries are never tagged; move their content into the dated
   release section before tagging.
+- The CHANGELOG requirement predates v0.3.0. Versions released before that
+  (`v0.1.1`, `v0.2.0`) were published without a changelog and therefore have no
+  entries — this is expected, not an oversight.

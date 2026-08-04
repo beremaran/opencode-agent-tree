@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import test from "node:test"
+import { fileURLToPath } from "node:url"
 import type { Config, PluginInput } from "@opencode-ai/plugin"
 
 const { OrchestratorPlugin } = await import("../src/index.ts")
@@ -21,14 +23,16 @@ type TestAgent = {
   model?: string
   mode?: string
   disable?: boolean
-  prompt?: string
+  description?: string
+  tools?: Record<string, unknown>
+  prompt?: unknown
   permission?: Record<string, unknown> | string
 }
 
 type TestConfig = {
   model?: string
-  default_agent?: string
-  agent?: Record<string, TestAgent>
+  default_agent?: unknown
+  agent: Record<string, TestAgent>
 }
 
 const createInput = () => {
@@ -47,11 +51,19 @@ const createInput = () => {
   }
 }
 
-const apply = async (options: Record<string, unknown>, config: TestConfig) => {
+const apply = async (options: Record<string, unknown>, config: Partial<TestConfig>) => {
   const { input, logs } = createInput()
-  const hooks = await OrchestratorPlugin(input, options)
-  await hooks.config(config as Config)
-  return { config, logs, hooks }
+  const pluginHooks = await OrchestratorPlugin(input, options)
+  const configHook = pluginHooks.config
+  assert.ok(configHook, "plugin must expose a config hook")
+  await configHook(config as Config)
+  return {
+    config: config as TestConfig,
+    logs,
+    // Wrap the raw hook so re-run call sites get a config hook that accepts
+    // the looser TestConfig shape used throughout the tests.
+    hooks: { config: async (cfg: TestConfig) => configHook(cfg as Config) },
+  }
 }
 
 // Filter-based log helpers: tests should never depend on absolute log
@@ -65,6 +77,24 @@ const warns = (logs: LogEntry[]) => logs.filter((entry) => entry.body.level === 
 
 const warnMatching = (logs: LogEntry[], pattern: RegExp) =>
   warns(logs).filter((entry) => pattern.test(entry.body.message))
+
+// Access helpers: tests deliberately feed the plugin malformed shapes (e.g. a
+// string permission, a non-string prompt), so these narrow the produced fields
+// after asserting the plugin left them in the expected shape.
+const promptOf = (config: TestConfig, name: string): string => {
+  const prompt = config.agent[name]?.prompt
+  assert.equal(typeof prompt, "string", `agent "${name}" prompt should be a string`)
+  return prompt as string
+}
+
+const permissionOf = (config: TestConfig, name: string): Record<string, unknown> => {
+  const permission = config.agent[name]?.permission
+  assert.ok(
+    permission && typeof permission === "object" && !Array.isArray(permission),
+    `agent "${name}" permission should be an object`,
+  )
+  return permission as Record<string, unknown>
+}
 
 test("routes only eligible agents and preserves explicit models", async () => {
   const { config, logs } = await apply(
@@ -98,9 +128,9 @@ test("routes only eligible agents and preserves explicit models", async () => {
   assert.equal(config.agent.disabled.model, undefined)
   assert.equal(config.agent.Manager.model, "override/model")
   assert.equal(config.agent.Manager.mode, "primary")
-  assert.match(config.agent.Manager.prompt, /Keep reports concise\./)
-  assert.equal(config.agent.Manager.permission.edit, "deny")
-  assert.equal(config.agent.Manager.permission.bash, "deny")
+  assert.match(promptOf(config, "Manager"), /Keep reports concise\./)
+  assert.equal(permissionOf(config, "Manager").edit, "deny")
+  assert.equal(permissionOf(config, "Manager").bash, "deny")
 })
 
 test("explicit agent selection is filtered, deduplicated, and accurately logged", async () => {
@@ -136,7 +166,7 @@ test("configuration is idempotent and custom orchestrators are primary agents", 
 
   assert.equal(config.agent.lead.mode, "primary")
   assert.equal(config.agent.lead.permission, undefined)
-  assert.equal((config.agent.lead.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal((promptOf(config, "lead").match(/# Orchestrator Mode/g) ?? []).length, 1)
   assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore", "helper"])
   assert.equal(warnMatching(logs, /Converting agent/).length, 0)
 })
@@ -177,7 +207,7 @@ test("disabled orchestrator agent logs an error without throwing and makes no mu
 
   // The config hook must never throw; a disabled orchestrator is handled
   // by logging an error and returning without mutating anything.
-  await hooks.config(config as Config)
+  await hooks.config?.(config as Config)
 
   const errors = errorLogs(logs)
   assert.equal(errors.length, 1)
@@ -198,8 +228,8 @@ test("directive is appended to an existing orchestrator prompt", async () => {
     { agent: { Manager: { mode: "primary", prompt: "Existing prompt text." } } },
   )
 
-  assert.ok(config.agent.Manager.prompt.startsWith("Existing prompt text."))
-  assert.equal((config.agent.Manager.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.ok(promptOf(config, "Manager").startsWith("Existing prompt text."))
+  assert.equal((promptOf(config, "Manager").match(/# Orchestrator Mode/g) ?? []).length, 1)
 })
 
 test("orchestrator permissions merge with a clobber warning", async () => {
@@ -250,7 +280,7 @@ test("re-running the config hook is idempotent and does not repeat warnings", as
   await hooks.config(config)
 
   assert.equal(config.agent.worker.model, "fallback/model")
-  assert.equal((config.agent.Manager.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal((promptOf(config, "Manager").match(/# Orchestrator Mode/g) ?? []).length, 1)
   assert.equal(warnMatching(logs, /Overwriting existing permission/).length, 1)
   assert.equal(warnMatching(logs, /Converting agent/).length, 0)
 })
@@ -281,7 +311,7 @@ test("default config creates a Manager orchestrator agent with the directive and
 
   assert.equal(config.agent.Manager.mode, "primary")
   assert.deepEqual(config.agent.Manager.permission, { edit: "deny", bash: "deny" })
-  assert.equal((config.agent.Manager.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal((promptOf(config, "Manager").match(/# Orchestrator Mode/g) ?? []).length, 1)
   assert.equal(config.agent.Manager.tools, undefined)
   assert.equal(config.agent.Manager.disable, undefined)
   assert.equal(summaryLog(logs)?.body.service, SERVICE)
@@ -403,7 +433,7 @@ test("blocking a directive tool warns but still applies the deny", async () => {
   assert.equal(directiveWarnings.length, 1)
   assert.match(directiveWarnings[0].body.message, /Orchestrator relies on blocked tool\(s\): task/)
   assert.deepEqual(directiveWarnings[0].body.extra?.blockedTools, ["task"])
-  assert.equal(config.agent.Manager.permission.task, "deny")
+  assert.equal(permissionOf(config, "Manager").task, "deny")
 })
 
 test("explicit agents omitting built-ins log a warning", async () => {
@@ -439,15 +469,19 @@ test("agent names colliding with Object.prototype keys are handled safely", asyn
     { agent: {} },
   )
 
-  assert.equal(Object.hasOwn(config.agent, "toString"), true)
-  assert.equal(config.agent.toString.model, "provider/model")
+  // Use a variable key: dot access ("config.agent.toString") would resolve to
+  // Object.prototype.toString instead of the agent entry, and a literal bracket
+  // access trips biome's useLiteralKeys rule.
+  const collisionKey = "toString"
+  assert.equal(Object.hasOwn(config.agent, collisionKey), true)
+  assert.equal(config.agent[collisionKey].model, "provider/model")
 })
 
 test("whitespace-only or empty instructions are not appended to the directive", async () => {
   for (const instructions of ["", "   "]) {
     const { config } = await apply({ subagentModel: "provider/model", instructions }, { agent: {} })
-    assert.ok(config.agent.Manager.prompt.endsWith("`general`."))
-    assert.equal(config.agent.Manager.prompt.includes("   "), false)
+    assert.ok(promptOf(config, "Manager").endsWith("`general`."))
+    assert.equal(promptOf(config, "Manager").includes("   "), false)
   }
 })
 
@@ -479,8 +513,8 @@ test("config without an agent key gets a working agent object", async () => {
 
   assert.ok(config.agent)
   assert.equal(config.agent.Manager.mode, "primary")
-  assert.equal(config.agent.Manager.permission.edit, "deny")
-  assert.equal((config.agent.Manager.prompt.match(/# Orchestrator Mode/g) ?? []).length, 1)
+  assert.equal(permissionOf(config, "Manager").edit, "deny")
+  assert.equal((promptOf(config, "Manager").match(/# Orchestrator Mode/g) ?? []).length, 1)
 })
 
 test("summary log reports the top-level model when no orchestratorModel is set", async () => {
@@ -500,8 +534,8 @@ test("blocked directive tools are joined into a single warning", async () => {
   assert.equal(warnings.length, 1)
   assert.match(warnings[0].body.message, /task, read/)
   assert.deepEqual(warnings[0].body.extra?.blockedTools, ["task", "read"])
-  assert.equal(config.agent.Manager.permission.task, "deny")
-  assert.equal(config.agent.Manager.permission.read, "deny")
+  assert.equal(permissionOf(config, "Manager").task, "deny")
+  assert.equal(permissionOf(config, "Manager").read, "deny")
 })
 
 test("an empty explicit agents list warns about built-in omission and routes nothing", async () => {
@@ -541,7 +575,10 @@ test("orchestratorModel overrides an existing orchestrator model unconditionally
 test("non-record options are rejected at the factory", async () => {
   const { input, logs } = createInput()
 
-  await assert.rejects(() => OrchestratorPlugin(input, "not-an-object"), /options.*object/)
+  await assert.rejects(
+    () => OrchestratorPlugin(input, "not-an-object" as unknown as Record<string, unknown>),
+    /options.*object/,
+  )
   assert.equal(errorLogs(logs).length, 1)
 })
 
@@ -580,7 +617,7 @@ test("the orchestrator agent is excluded from routing even when listed in agents
 test("empty blockedTools render the directive with a (none) placeholder", async () => {
   const { config } = await apply({ subagentModel: "provider/model", blockedTools: [] }, { agent: {} })
 
-  assert.ok(config.agent.Manager.prompt.includes("hard-blocked for you (none)"))
+  assert.ok(promptOf(config, "Manager").includes("hard-blocked for you (none)"))
   assert.equal(config.agent.Manager.permission, undefined)
 })
 
@@ -600,4 +637,405 @@ test("summary log reports (unset) when no default agent is configured", async ()
   const { logs } = await apply({ subagentModel: "provider/model" }, { agent: {} })
 
   assert.equal(summaryLog(logs)?.body.extra?.defaultAgent, "(unset)")
+})
+
+// ─── restrictTask ────────────────────────────────────────────────────────────
+
+test("restrictTask pins task permissions to the routed delegation targets", async () => {
+  const { config, logs } = await apply({ subagentModel: "provider/model", restrictTask: true }, { agent: {} })
+
+  assert.deepEqual(permissionOf(config, "Manager").task, {
+    "*": "deny",
+    general: "allow",
+    explore: "allow",
+  })
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore"])
+})
+
+test("restrictTask preserves unrelated orchestrator permission entries", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model", restrictTask: true },
+    { agent: { Manager: { mode: "primary", permission: { bash: "ask", webfetch: "allow" } } } },
+  )
+
+  assert.deepEqual(config.agent.Manager.permission, {
+    bash: "deny",
+    webfetch: "allow",
+    edit: "deny",
+    task: { "*": "deny", general: "allow", explore: "allow" },
+  })
+})
+
+test("restrictTask warns when overwriting an existing task rule", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "provider/model", restrictTask: true },
+    { agent: { Manager: { mode: "primary", permission: { task: "allow" } } } },
+  )
+
+  const overwrite = warnMatching(logs, /Overwriting existing permission for tool "task"/)
+  assert.equal(overwrite.length, 1)
+  assert.match(overwrite[0].body.message, /restricted delegation rule/)
+  assert.deepEqual(permissionOf(config, "Manager").task, {
+    "*": "deny",
+    general: "allow",
+    explore: "allow",
+  })
+})
+
+test("restrictTask warns when replacing command-scoped task rules", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "provider/model", restrictTask: true },
+    { agent: { Manager: { mode: "primary", permission: { task: { "*": "allow" } } } } },
+  )
+
+  const overwrite = warnMatching(logs, /command-scoped/)
+  assert.equal(overwrite.length, 1)
+  assert.match(overwrite[0].body.message, /tool "task"/)
+  assert.deepEqual(permissionOf(config, "Manager").task, {
+    "*": "deny",
+    general: "allow",
+    explore: "allow",
+  })
+})
+
+test("restrictTask is idempotent when the task rule already matches", async () => {
+  const { config, hooks, logs } = await apply(
+    { subagentModel: "provider/model", restrictTask: true },
+    {
+      agent: {
+        Manager: {
+          mode: "primary",
+          permission: { task: { "*": "deny", general: "allow", explore: "allow" } },
+        },
+      },
+    },
+  )
+
+  assert.equal(warnMatching(logs, /Overwriting existing permission for tool "task"/).length, 0)
+  await hooks.config(config)
+  assert.equal(warnMatching(logs, /Overwriting existing permission for tool "task"/).length, 0)
+  assert.deepEqual(permissionOf(config, "Manager").task, {
+    "*": "deny",
+    general: "allow",
+    explore: "allow",
+  })
+})
+
+test("restrictTask defaults to false and leaves an existing task rule untouched", async () => {
+  for (const options of [
+    { subagentModel: "provider/model" },
+    { subagentModel: "provider/model", restrictTask: false },
+  ]) {
+    const { config } = await apply(options, {
+      agent: { Manager: { mode: "primary", permission: { task: { "*": "allow" } } } },
+    })
+
+    assert.deepEqual(config.agent.Manager.permission, { task: { "*": "allow" }, edit: "deny", bash: "deny" })
+  }
+})
+
+test("non-boolean restrictTask is rejected at the factory", async () => {
+  for (const restrictTask of ["yes", 1, null]) {
+    const { input, logs } = createInput()
+    await assert.rejects(
+      () => OrchestratorPlugin(input, { subagentModel: "provider/model", restrictTask }),
+      /restrictTask/,
+    )
+    assert.equal(errorLogs(logs).length, 1)
+  }
+})
+
+// ─── orchestrator default description ────────────────────────────────────────
+
+test("orchestrator gets the default description when created", async () => {
+  const { config } = await apply({ subagentModel: "provider/model" }, { agent: {} })
+
+  assert.equal(
+    config.agent.Manager.description,
+    "Orchestrator agent: decomposes every request and delegates to subagents.",
+  )
+})
+
+test("orchestrator gets the default description when the existing description is empty", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model" },
+    { agent: { Manager: { mode: "primary", description: "" } } },
+  )
+
+  assert.equal(
+    config.agent.Manager.description,
+    "Orchestrator agent: decomposes every request and delegates to subagents.",
+  )
+})
+
+test("orchestrator keeps an existing non-empty description", async () => {
+  const { config } = await apply(
+    { subagentModel: "provider/model" },
+    { agent: { Manager: { mode: "primary", description: "My custom orchestrator" } } },
+  )
+
+  assert.equal(config.agent.Manager.description, "My custom orchestrator")
+})
+
+// ─── unexpected-error path ───────────────────────────────────────────────────
+
+test("a non-string orchestrator prompt logs a distinct plugin-bug error without throwing", async () => {
+  const { logs } = await apply(
+    { subagentModel: "provider/model" },
+    { agent: { Manager: { mode: "primary", prompt: 42 } } },
+  )
+
+  const errors = errorLogs(logs)
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].body.service, SERVICE)
+  assert.match(errors[0].body.message, /Unexpected error in opencode-agent-tree config hook/)
+  assert.match(errors[0].body.message, /plugin bug/)
+  assert.ok(errors[0].body.extra?.error instanceof TypeError)
+})
+
+test("disabled-orchestrator errors are distinct from unexpected plugin-bug errors", async () => {
+  const disabled = await apply({ subagentModel: "provider/model" }, { agent: { Manager: { disable: true } } })
+  const unexpected = await apply(
+    { subagentModel: "provider/model" },
+    { agent: { Manager: { mode: "primary", prompt: 42 } } },
+  )
+
+  const disabledMessage = errorLogs(disabled.logs)[0].body.message
+  const unexpectedMessage = errorLogs(unexpected.logs)[0].body.message
+  assert.match(disabledMessage, /orchestrator agent `Manager` is disabled/)
+  assert.match(unexpectedMessage, /Unexpected error/)
+  assert.notEqual(disabledMessage, unexpectedMessage)
+})
+
+// ─── default_agent guard ─────────────────────────────────────────────────────
+
+test("summary log reports (unset) for a non-string default_agent", async () => {
+  const { logs } = await apply({ subagentModel: "provider/model" }, { default_agent: 42, agent: {} })
+
+  assert.equal(summaryLog(logs)?.body.extra?.defaultAgent, "(unset)")
+})
+
+// ─── model validation ────────────────────────────────────────────────────────
+
+test("model ids with internal whitespace are rejected", async () => {
+  for (const subagentModel of ["prov ider/model", "provider/mod el"]) {
+    const { input, logs } = createInput()
+    await assert.rejects(() => OrchestratorPlugin(input, { subagentModel }), /provider\/model/)
+    assert.equal(errorLogs(logs).length, 1)
+  }
+})
+
+test("model ids with dots, dashes, underscores, and colons are accepted", async () => {
+  const { config } = await apply(
+    {
+      subagentModel: "provider/model",
+      orchestratorModel: "provider/claude-sonnet-4-6",
+      agentModels: {
+        worker: "provider/model_id",
+        general: "provider/model:tag",
+        explore: "my-provider/my.model",
+      },
+    },
+    {
+      agent: {
+        worker: { mode: "subagent" },
+        general: { mode: "subagent" },
+        explore: { mode: "subagent" },
+      },
+    },
+  )
+
+  assert.equal(config.agent.worker.model, "provider/model_id")
+  assert.equal(config.agent.general.model, "provider/model:tag")
+  assert.equal(config.agent.explore.model, "my-provider/my.model")
+  assert.equal(config.agent.Manager.model, "provider/claude-sonnet-4-6")
+})
+
+test("subagentModel null is reported as a required-option error", async () => {
+  const { input, logs } = createInput()
+
+  await assert.rejects(() => OrchestratorPlugin(input, { subagentModel: null }), /subagentModel.*required/)
+  assert.equal(errorLogs(logs).length, 1)
+})
+
+test("agents: ['general'] routes only general with no omission or phantom warnings", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "provider/model", agents: ["general"] },
+    { agent: {} },
+  )
+
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general"])
+  assert.equal(config.agent.general.model, "provider/model")
+  assert.equal(config.agent.explore, undefined)
+  assert.equal(config.agent.scout, undefined)
+  assert.equal(warnMatching(logs, /built-in subagents/).length, 0)
+  assert.equal(warnMatching(logs, /unknown name/).length, 0)
+})
+
+// ─── coverage gaps: routing and factory validation ──────────────────────────
+
+test("declared agents without a mode are routed by default like subagents", async () => {
+  const { config, logs } = await apply({ subagentModel: "provider/model" }, { agent: { worker: {} } })
+
+  assert.equal(config.agent.worker.model, "provider/model")
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore", "worker"])
+})
+
+test("empty-string orchestratorAgent is rejected at the factory", async () => {
+  const { input, logs } = createInput()
+
+  await assert.rejects(
+    () => OrchestratorPlugin(input, { subagentModel: "provider/model", orchestratorAgent: "" }),
+    /orchestratorAgent/,
+  )
+  assert.equal(errorLogs(logs).length, 1)
+})
+
+test("blockedTools as a plain string is rejected at the factory", async () => {
+  const { input, logs } = createInput()
+
+  await assert.rejects(
+    () => OrchestratorPlugin(input, { subagentModel: "provider/model", blockedTools: "task" }),
+    /blockedTools/,
+  )
+  assert.equal(errorLogs(logs).length, 1)
+})
+
+test("agents entries that are empty strings or non-strings are rejected", async () => {
+  for (const agents of [[""], [42], ["general", ""]]) {
+    const { input, logs } = createInput()
+    await assert.rejects(
+      () => OrchestratorPlugin(input, { subagentModel: "provider/model", agents }),
+      /agents/,
+    )
+    assert.equal(errorLogs(logs).length, 1)
+  }
+})
+
+test("blockedTools entries that are empty strings or non-strings are rejected", async () => {
+  for (const blockedTools of [[""], [42], ["edit", ""]]) {
+    const { input, logs } = createInput()
+    await assert.rejects(
+      () => OrchestratorPlugin(input, { subagentModel: "provider/model", blockedTools }),
+      /blockedTools/,
+    )
+    assert.equal(errorLogs(logs).length, 1)
+  }
+})
+
+test("agentModels: [] is rejected at the factory", async () => {
+  const { input, logs } = createInput()
+
+  await assert.rejects(
+    () => OrchestratorPlugin(input, { subagentModel: "provider/model", agentModels: [] }),
+    /agentModels/,
+  )
+  assert.equal(errorLogs(logs).length, 1)
+})
+
+test("agentModels with empty-string or non-string values are rejected", async () => {
+  for (const agentModels of [{ worker: "" }, { worker: 42 }]) {
+    const { input, logs } = createInput()
+    await assert.rejects(
+      () => OrchestratorPlugin(input, { subagentModel: "provider/model", agentModels }),
+      /agentModels values/,
+    )
+    assert.equal(errorLogs(logs).length, 1)
+  }
+})
+
+test("instructions: 42 is rejected at the factory", async () => {
+  const { input, logs } = createInput()
+
+  await assert.rejects(
+    () => OrchestratorPlugin(input, { subagentModel: "provider/model", instructions: 42 }),
+    /instructions/,
+  )
+  assert.equal(errorLogs(logs).length, 1)
+})
+
+test("an already-denied blocked tool produces no overwrite warning", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "provider/model" },
+    { agent: { Manager: { mode: "primary", permission: { edit: "deny", bash: "deny" } } } },
+  )
+
+  assert.equal(warnMatching(logs, /Overwriting existing permission/).length, 0)
+  assert.deepEqual(config.agent.Manager.permission, { edit: "deny", bash: "deny" })
+})
+
+test("empty blockedTools preserve an existing permission object", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "provider/model", blockedTools: [] },
+    { agent: { Manager: { mode: "primary", permission: { bash: "ask", webfetch: "allow" } } } },
+  )
+
+  assert.deepEqual(config.agent.Manager.permission, { bash: "ask", webfetch: "allow" })
+  assert.equal(warnMatching(logs, /Overwriting/).length, 0)
+})
+
+test("agentModels entries for built-in primary agents are ignored", async () => {
+  const { config, logs } = await apply(
+    {
+      subagentModel: "provider/model",
+      agentModels: { build: "x/build", plan: "x/plan", worker: "x/worker" },
+    },
+    { agent: { worker: { mode: "subagent" } } },
+  )
+
+  assert.equal(config.agent.build, undefined)
+  assert.equal(config.agent.plan, undefined)
+  assert.equal(config.agent.worker.model, "x/worker")
+  assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore", "worker"])
+})
+
+test("blocking a non-directive custom tool applies deny with no directive warning", async () => {
+  const { config, logs } = await apply(
+    { subagentModel: "provider/model", blockedTools: ["custom_tool"] },
+    { agent: {} },
+  )
+
+  assert.deepEqual(config.agent.Manager.permission, { custom_tool: "deny" })
+  assert.equal(warnMatching(logs, /Orchestrator relies on blocked tool/).length, 0)
+})
+
+test("subagentModel is trimmed of surrounding whitespace", async () => {
+  const { config, logs } = await apply({ subagentModel: "  provider/model  " }, { agent: {} })
+
+  assert.equal(config.agent.general.model, "provider/model")
+  assert.equal(config.agent.explore.model, "provider/model")
+  const summary = summaryLog(logs)
+  assert.ok(summary)
+  assert.match(summary.body.message, /subagents -> provider\/model/)
+})
+
+// ─── directive/README sync ───────────────────────────────────────────────────
+
+// Extracts the content of the fenced markdown block whose lines include the
+// given marker (e.g. the "# Orchestrator Mode" directive in README.md).
+const extractFencedBlock = (markdown: string, marker: string): string => {
+  const lines = markdown.split("\n")
+  const markerIndex = lines.findIndex((line) => line.includes(marker))
+  assert.ok(markerIndex >= 0, `expected a fenced block containing "${marker}"`)
+
+  let start = markerIndex
+  while (start >= 0 && !/^```/.test(lines[start])) start -= 1
+  let end = markerIndex
+  while (end < lines.length && !/^```/.test(lines[end])) end += 1
+  assert.ok(start >= 0 && end < lines.length, "fenced block must be well-formed")
+
+  return lines.slice(start + 1, end).join("\n")
+}
+
+test("rendered directive matches the README fenced block byte-for-byte", async () => {
+  const { config } = await apply({ subagentModel: "provider/model" }, { agent: {} })
+  const rendered = promptOf(config, "Manager")
+  const readmePath = fileURLToPath(new URL("../README.md", import.meta.url))
+  const readme = readFileSync(readmePath, "utf8")
+  const block = extractFencedBlock(readme, "# Orchestrator Mode (enforced by")
+
+  // Normalize trailing newlines: the rendered directive has none, and the
+  // README block may have one before the closing fence. Everything else must
+  // match exactly, so a drift in either file fails this test.
+  assert.equal(rendered.replace(/\n+$/, ""), block.replace(/\n+$/, ""))
 })

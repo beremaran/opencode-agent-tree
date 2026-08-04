@@ -81,6 +81,12 @@ From npm:
 
 > Config is loaded at startup. **Restart opencode** after adding the plugin.
 
+> **Runtime:** this package ships **raw TypeScript** (`src/index.ts`) with no build
+> step. It runs only under opencode's plugin loader, which executes plugins on
+> Bun and strips types at load time. It is **not** importable from plain Node.js
+> — the `engines` field (`>=22.6`) exists for tooling compatibility only and is
+> not a promise that a plain Node process can load the plugin.
+
 ## Getting started: pick your default agent
 
 Installing the plugin **creates the `Manager` agent but does not make it your
@@ -113,6 +119,18 @@ summary entry's extra metadata) so you can confirm which mode a session runs in.
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. Never applies to the orchestrator agent (it is never routed). |
 | `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
 | `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. Names must match `[a-z0-9_-]+`. |
+| `restrictTask`      | `boolean`            | `false`                          | When `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents. Closes the "delegate to an unrestricted agent" loophole (see [Security](#security)). |
+
+### Permission keys gate tool families
+
+`permission` values in opencode are keyed by **permission key**, not by every
+individual tool name. One key covers a whole tool family, so when you write
+`blockedTools` (or any permission config) use the key, not the tool names. For
+example, the `edit` permission key covers the `edit`, `write`, and `apply_patch`
+tools — denying `edit` denies all three. (The exact tool-to-key mapping is
+defined by opencode and can vary across versions, so prefer documented keys
+such as `edit`, `bash`, `read`, `task`, `todowrite`, `webfetch`, `websearch`,
+and `question`.)
 
 ### Model precedence
 
@@ -152,6 +170,10 @@ The orchestrator is asymmetric:
 }
 ```
 
+> Model IDs in the examples are **illustrative** — substitute real
+> `provider/model` IDs that exist in your opencode setup (check your configured
+> providers or `opencode models`).
+
 ## Validation & warnings
 
 At startup the plugin validates the configuration and reports self-contradictory
@@ -171,7 +193,7 @@ Everything else logs a `warn` message and continues.
 | Condition | Result |
 | --------- | ------ |
 | The orchestrator agent named by `orchestratorAgent` is disabled | Error logged; the plugin's config is **not applied**; opencode continues with the original config |
-| `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (at least one `/`, non-empty on both sides; further slashes are allowed in the model part) | Config error, plugin load aborts |
+| `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (exactly one `/`, non-empty on both sides, no whitespace; dots, dashes, underscores, and colons are allowed in the model part, but not further slashes) | Config error, plugin load aborts |
 | A `blockedTools` name does not match `[a-z0-9_-]+` (lowercase letters, digits, underscore, hyphen) | Config error, plugin load aborts |
 | `blockedTools` includes a directive-dependent tool (`task`, `todowrite`, `question`, `read`, `glob`, `grep`, `webfetch`, `websearch`) | Warning: the orchestrator is told to delegate with a tool it cannot use |
 | A blocked tool's existing permission on the orchestrator agent is a plain value other than `deny` and is overwritten with `deny` | Warning naming the tool and agent (an existing value that is already `deny` is not warned about) |
@@ -193,6 +215,13 @@ the configuration it runs with. Only use this plugin with config you control.
 - **Subagents keep their hands-on tools.** Delegation does not remove tools
   from subagents; the plugin constrains the orchestrator, not the subagents. A
   delegated subagent can still `edit` and `bash`.
+- **The "delegate to an unrestricted agent" loophole.** Because subagents keep
+  their tools, a prompt that is not following the directive could try to
+  delegate to an agent the plugin did not restrict, bypassing the block. Set
+  `restrictTask: true` to close this: the orchestrator's permission then only
+  allows `task` toward the plugin's routed delegation targets (`task` is denied
+  for everything else), so it physically cannot delegate to an unrestricted
+  agent.
 - **`orchestratorModel` can override an explicitly configured model** on the
   orchestrator agent.
 
@@ -281,7 +310,8 @@ Pushing the tag runs `.github/workflows/publish.yml`, which:
    the released version.
 2. Installs dependencies and runs the full check suite (`npm run check`).
 3. Inspects the packed tarball and asserts it contains exactly the expected
-   files (`LICENSE`, `README.md`, `package.json`, `src/index.ts`).
+   files (`LICENSE`, `README.md`, `CHANGELOG.md`, `package.json`,
+   `src/index.ts`).
 4. Smoke-tests the tarball from a clean consumer install — a temp directory
    with `npm init -y` + `npm install <tarball>` — importing **by package name**
    under **Bun** (the same runtime opencode uses to load plugins) and asserting

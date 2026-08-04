@@ -4,26 +4,76 @@ on:
   push:
     tags:
       - "v*"
+  # Allow re-running a publish for an existing tag (e.g. after a transient
+  # failure). The tag ref must be supplied explicitly; every verification step
+  # below still runs against that tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v1.2.3)"
+        required: true
+        type: string
 
+# Minimal explicit permissions for this workflow:
+#   contents: write - softprops/action-gh-release creates the GitHub Release
+#   id-token: write - npm publish uses it for provenance attestation
 permissions:
   contents: write
   id-token: write
 
+# Serialize publishes of the same tag (push-tag or manual dispatch) and never
+# cancel a publish already in progress.
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
+env:
+  # Effective release tag: the pushed tag on tag pushes, or the manually
+  # supplied tag on workflow_dispatch.
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
 jobs:
+  guard:
+    name: Guard release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # On push-tag runs github.ref is already the tag; on workflow_dispatch
+          # the tag comes from the required input.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          fetch-depth: 0
+
+      - name: Verify tag is on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG" || {
+            echo "::error::RELEASE_TAG is empty; cannot guard an untagged release." >&2
+            exit 1
+          }
+          git fetch origin "$DEFAULT_BRANCH" --tags --force
+          if ! git merge-base --is-ancestor "refs/tags/$RELEASE_TAG" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::Tag $RELEASE_TAG is not an ancestor of the default branch ($DEFAULT_BRANCH); refusing to publish a tag created on a random branch." >&2
+            exit 1
+          fi
+          echo "Tag $RELEASE_TAG is contained in $DEFAULT_BRANCH."
+
   publish:
     name: Publish
+    needs: guard
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -32,9 +82,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify package and release tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
           PACKAGE_NAME="$(node -p 'require("./package.json").name')"
           PACKAGE_VERSION="$(node -p 'require("./package.json").version')"
           test "$PACKAGE_NAME" = "@beremaran/opencode-agent-tree"
@@ -55,13 +104,13 @@ jobs:
       - name: Inspect package contents
         run: |
           # Assert the packed tarball contains exactly the expected files:
-          # LICENSE, README.md, package.json, src/index.ts.
+          # CHANGELOG.md, LICENSE, README.md, package.json, src/index.ts.
           npm pack --dry-run --json > pack-info.json
           node --input-type=module -e '
             import { readFileSync } from "node:fs"
             const [entry] = JSON.parse(readFileSync("pack-info.json", "utf8"))
             const actual = entry.files.map((f) => f.path).sort()
-            const expected = ["LICENSE", "README.md", "package.json", "src/index.ts"].sort()
+            const expected = ["CHANGELOG.md", "LICENSE", "README.md", "package.json", "src/index.ts"].sort()
             if (JSON.stringify(actual) !== JSON.stringify(expected)) {
               console.error("packed file mismatch")
               console.error("expected: " + expected.join(", "))
@@ -71,7 +120,7 @@ jobs:
           '
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Smoke-test packed tarball
         run: |
@@ -91,9 +140,9 @@ jobs:
           bun -e "await import('@beremaran/opencode-agent-tree').then(m => { if (typeof m.default !== 'function' || typeof m.OrchestratorPlugin !== 'function') process.exit(1) })"
 
       - name: Extract CHANGELOG section for release body
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016 # $ is intentional inside the single-quoted Node script
           node --input-type=module -e '
             import { readFileSync, writeFileSync } from "node:fs"
             const version = process.env.RELEASE_TAG.replace(/^v/, "")
@@ -116,9 +165,9 @@ jobs:
         run: npm publish
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           body_path: /tmp/release-body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

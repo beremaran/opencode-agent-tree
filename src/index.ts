@@ -54,12 +54,20 @@ export interface OrchestratorOptions {
    * enforcement.
    */
   blockedTools?: string[]
+
+  /**
+   * When true, the orchestrator's `permission.task` rule is set to deny
+   * delegation to every agent except the routed subagents, so the
+   * orchestrator can only delegate to them. Default: false.
+   */
+  restrictTask?: boolean
 }
 
 type AgentLike = {
   model?: string
   mode?: string
   disable?: boolean
+  description?: string
   prompt?: string
   permission?: Record<string, unknown>
 }
@@ -72,6 +80,7 @@ type NormalizedOptions = {
   agentModels: Record<string, string>
   instructions?: string
   blockedTools: string[]
+  restrictTask: boolean
 }
 
 const DEFAULTS = {
@@ -83,14 +92,23 @@ const DEFAULTS = {
  * Built-in agents are not present in the merged config when the plugin
  * `config` hook runs, so the target entries must be created explicitly.
  * Entries created here are merged over the built-ins at agent lookup time.
+ *
+ * This list mirrors opencode's built-in subagents for the supported peer
+ * range (>=1.18.11 <2) and must be updated if opencode adds or renames
+ * built-in subagents. Note: `scout` appears in newer opencode docs but is
+ * not native as of 1.18.x, so it is deliberately excluded until the
+ * supported peer range includes it (routing a non-native name creates a
+ * phantom agent with no prompt/description).
  */
 const BUILTIN_SUBAGENTS = ["general", "explore"]
 
 /**
- * Known built-in primary/system agents. Unlike BUILTIN_SUBAGENTS these are
- * never routable, even when absent from the merged config, so candidates
- * with these names are excluded from routing (and from the phantom-name
- * warning).
+ * Known built-in agents. Unlike BUILTIN_SUBAGENTS these are never routable,
+ * even when absent from the merged config, so candidates with these names
+ * are excluded from routing (and from the phantom-name warning).
+ *
+ * This list mirrors opencode's built-in agents for the supported peer range
+ * (>=1.18.11 <2) and must be updated if opencode adds or renames built-ins.
  */
 const KNOWN_BUILTINS = ["build", "plan", "compaction", "title", "summary"]
 
@@ -98,7 +116,7 @@ const DIRECTIVE_TOOLS = ["task", "todowrite", "question", "read", "glob", "grep"
 
 const BLOCKED_TOOL_PATTERN = /^[a-z0-9_-]+$/
 
-const MODEL_PATTERN = /^[^/]+\/.+$/
+const MODEL_PATTERN = /^[^\s/]+\/[^\s/]+$/
 
 const isSubagentLike = (agent: AgentLike | undefined) =>
   !agent || agent.mode === undefined || agent.mode === "subagent" || agent.mode === "all"
@@ -115,6 +133,11 @@ const nonEmptyString = (value: unknown, name: string): string => {
   const trimmed = (value as string).trim()
   if (trimmed === "") invalidOption(name, "a non-empty string")
   return trimmed
+}
+
+const booleanOption = (value: unknown, name: string): boolean => {
+  if (typeof value !== "boolean") invalidOption(name, "a boolean")
+  return value as boolean
 }
 
 const optionalString = (value: unknown, name: string): string | undefined => {
@@ -155,6 +178,35 @@ const validateBlockedTools = (names: string[]): string[] => {
   return names
 }
 
+/**
+ * Reads `cfg.default_agent` defensively for the summary log. Returns the
+ * value only when it is a non-empty string, otherwise "(unset)". Never
+ * throws if the field is missing or has an unexpected shape.
+ */
+const defaultAgentOf = (cfg: Config): string => {
+  const value = (cfg as Config & { default_agent?: unknown }).default_agent
+  return typeof value === "string" && value.trim() !== "" ? value : "(unset)"
+}
+
+/**
+ * Builds the `task` permission rule for restrictTask mode: deny delegation
+ * to every agent except the routed subagents (e.g.
+ * `{ "*": "deny", "general": "allow", "explore": "allow" }`).
+ */
+const taskRuleFor = (targets: string[]): Record<string, "deny" | "allow"> => {
+  const rule: Record<string, "deny" | "allow"> = { "*": "deny" }
+  for (const name of targets) rule[name] = "allow"
+  return rule
+}
+
+/** Structural equality check used to keep restrictTask idempotent. */
+const sameTaskRule = (value: unknown, expected: Record<string, "deny" | "allow">): boolean => {
+  if (!isRecord(value)) return false
+  const keys = Object.keys(value)
+  if (keys.length !== Object.keys(expected).length) return false
+  return keys.every((key) => value[key] === expected[key])
+}
+
 const REQUIRED_MODEL_MESSAGE = `[${PLUGIN_ID}] The \`subagentModel\` option is required, e.g. ["${PLUGIN_ID}", { "subagentModel": "anthropic/claude-sonnet-4-6" }]`
 
 const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
@@ -164,6 +216,7 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
 
   if (
     options.subagentModel === undefined ||
+    options.subagentModel === null ||
     (typeof options.subagentModel === "string" && options.subagentModel.trim() === "")
   ) {
     throw new Error(REQUIRED_MODEL_MESSAGE)
@@ -175,6 +228,8 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
       : stringArray(options.blockedTools, "blockedTools"),
   )
   const agents = options.agents === undefined ? undefined : stringArray(options.agents, "agents")
+  const restrictTask =
+    options.restrictTask === undefined ? false : booleanOption(options.restrictTask, "restrictTask")
   const orchestratorModel =
     options.orchestratorModel === undefined ||
     options.orchestratorModel === null ||
@@ -196,6 +251,7 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
     agentModels,
     instructions: optionalString(options.instructions, "instructions"),
     blockedTools,
+    restrictTask,
   }
 }
 
@@ -333,6 +389,10 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
             },
           })
         }
+        if (!orchestrator.description) {
+          orchestrator.description =
+            "Orchestrator agent: decomposes every request and delegates to subagents."
+        }
         const previousMode = orchestrator.mode
         if (orchestrator.mode !== "primary") {
           orchestrator.mode = "primary"
@@ -378,6 +438,39 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           }
           orchestrator.permission = permission
         }
+        if (opts.restrictTask && targets.length > 0) {
+          const taskRule = taskRuleFor(targets)
+          const rawPermission = orchestrator.permission
+          let permission: Record<string, unknown>
+          if (!isRecord(rawPermission)) {
+            await client.app.log({
+              body: {
+                service: PLUGIN_ID,
+                level: "warn",
+                message: `Orchestrator agent "${opts.orchestratorAgent}" has a non-object permission; replacing it with an empty permission object`,
+              },
+            })
+            permission = {}
+          } else {
+            permission = { ...rawPermission }
+          }
+          const existingTask = permission.task
+          if (existingTask !== undefined && !sameTaskRule(existingTask, taskRule)) {
+            await client.app.log({
+              body: {
+                service: PLUGIN_ID,
+                level: "warn",
+                message: isRecord(existingTask)
+                  ? `Overwriting existing command-scoped rules for tool "task" on agent "${opts.orchestratorAgent}" with the restricted delegation rule`
+                  : `Overwriting existing permission for tool "task" on agent "${opts.orchestratorAgent}" with the restricted delegation rule`,
+              },
+            })
+            permission.task = taskRule
+          } else if (existingTask === undefined) {
+            permission.task = taskRule
+          }
+          orchestrator.permission = permission
+        }
         if (!orchestrator.prompt?.includes(DIRECTIVE_MARKER)) {
           orchestrator.prompt = orchestrator.prompt
             ? `${orchestrator.prompt}\n\n${orchestratorDirective(opts)}`
@@ -393,14 +486,19 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
               routedAgents: targets,
               orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
               blockedTools: [...opts.blockedTools],
-              defaultAgent: (cfg as Config & { default_agent?: string }).default_agent ?? "(unset)",
+              defaultAgent: defaultAgentOf(cfg),
             },
           },
         })
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : `[${PLUGIN_ID}] Unexpected error in config hook.`
-        await client.app.log({ body: { service: PLUGIN_ID, level: "error", message } })
+        await client.app.log({
+          body: {
+            service: PLUGIN_ID,
+            level: "error",
+            message: `[${PLUGIN_ID}] Unexpected error in opencode-agent-tree config hook (this is a plugin bug; please report it)`,
+            extra: { error },
+          },
+        })
       }
     },
   }

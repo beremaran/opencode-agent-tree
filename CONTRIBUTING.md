@@ -35,13 +35,40 @@ Verify the startup log line is present:
 Orchestrator "Manager" enabled; subagents -> <subagentModel>
 ```
 
+## Writing tests
+
+- Tests live in a single file: `test/index.test.ts`. It uses `node:test`
+  (run via `npm test`, which invokes
+  `node --experimental-strip-types --test test/index.test.ts`; use
+  `npm run test:coverage` for coverage).
+- Keep log assertions **filter-based, not positional**. The test helpers
+  collect the plugin's `client.app.log` calls; match the log you care about by
+  filtering on message content (e.g. `warnMatching(logs, /blocked tool/)`),
+  never by assuming an index like `logs[0]` — a new warning added earlier in
+  the config hook would silently break it.
+- Add a test for any behavior you change, and run `npm run check`
+  (typecheck + lint + tests) before pushing; CI enforces it.
+
 ## Pull requests
 
 - Keep changes minimal and scoped.
 - Run `npm run check` before pushing; CI enforces it.
 - If you change the directive prompt (`orchestratorDirective` in `src/index.ts`),
-  update the copy in `README.md` to match.
+  update the copy in `README.md` to match. The rendered directive block in the
+  README is asserted byte-for-byte against the code's rendered directive, so a
+  prompt change **must** update both.
+- If you change observable behavior, update `CHANGELOG.md` under
+  `## [Unreleased]` and the README where relevant.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) style
+  (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, …); releases use
+  `chore: release vX.Y.Z` (see [RELEASING.md](RELEASING.md)).
 - Update `package.json` `version` only when asked to prepare a release.
+
+## Repository layout notes
+
+- `.opencode/` is intentionally **untracked**: it carries its own self-ignoring
+  `.gitignore` (ignoring itself), so a fresh clone will not contain it. It is a
+  local working area (e.g. saved workflows), not part of the published package.
 
 ## Releases
 
