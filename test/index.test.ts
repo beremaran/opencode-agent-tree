@@ -1079,7 +1079,7 @@ test("orchestratorDepth 2 creates a Manager -> Manager-2 chain with structural t
     edit: "deny",
     bash: "deny",
     task: { "*": "allow" },
-    todowrite: { "*": "allow" },
+    todowrite: "allow",
   })
   assert.equal(agentEntry(config, "Manager-2").model, "orchestrator/model")
   assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore"])
@@ -1116,8 +1116,8 @@ test("orchestratorDepth 3 creates a three-level chain; only the final level dele
   // working under the default prompt-only enforcement.
   assert.deepEqual(permissionOf(config, "Manager-3").task, { "*": "allow" })
   // Subagent levels must also declare todowrite or opencode strips it.
-  assert.deepEqual(permissionOf(config, "Manager-2").todowrite, { "*": "allow" })
-  assert.deepEqual(permissionOf(config, "Manager-3").todowrite, { "*": "allow" })
+  assert.equal(permissionOf(config, "Manager-2").todowrite, "allow")
+  assert.equal(permissionOf(config, "Manager-3").todowrite, "allow")
   assert.deepEqual(summaryLog(logs)?.body.extra?.routedAgents, ["general", "explore"])
 
   // Workers keep their tools: the plugin never touches their permission.
@@ -1154,7 +1154,7 @@ test("orchestratorDepth 2 with restrictTask pins the final level to the routed w
     general: "allow",
     explore: "allow",
   })
-  assert.deepEqual(permissionOf(config, "Manager-2").todowrite, { "*": "allow" })
+  assert.equal(permissionOf(config, "Manager-2").todowrite, "allow")
 })
 
 test("chain final levels always get a task rule so the task tool is never stripped", async () => {
@@ -1168,7 +1168,7 @@ test("chain final levels always get a task rule so the task tool is never stripp
   // ...and the final level gets a task rule even without restrictTask.
   assert.deepEqual(permissionOf(config, "Manager-3").task, { "*": "allow" })
   for (const name of ["Manager-2", "Manager-3"]) {
-    assert.deepEqual(permissionOf(config, name).todowrite, { "*": "allow" })
+    assert.equal(permissionOf(config, name).todowrite, "allow")
   }
 
   // Re-running the config hook keeps the rules idempotent.
@@ -1314,7 +1314,7 @@ test("a user-defined agent matching a deeper level name is taken over as that le
     edit: "deny",
     bash: "deny",
     task: { "*": "allow" },
-    todowrite: { "*": "allow" },
+    todowrite: "allow",
   })
   assert.match(promptOf(config, "Manager-2"), /# Orchestrator Mode \(level 2\/2/)
 })

@@ -283,8 +283,14 @@ const taskRuleFor = (targets: string[]): Record<string, "deny" | "allow"> => {
   return rule
 }
 
-/** Structural equality check used to keep task rules idempotent. */
-const sameTaskRule = (value: unknown, expected: Record<string, "deny" | "allow">): boolean => {
+/**
+ * Structural equality check used to keep permission rules idempotent. Rules
+ * may be the object form `{ "<target>": "allow" | "deny" }` (pattern-scoped
+ * tools like `task`) or a plain action string (tools like `todowrite`, whose
+ * opencode schema only accepts an action).
+ */
+const sameTaskRule = (value: unknown, expected: Record<string, "deny" | "allow"> | string): boolean => {
+  if (typeof expected === "string") return value === expected
   if (!isRecord(value)) return false
   const keys = Object.keys(value)
   if (keys.length !== Object.keys(expected).length) return false
@@ -524,14 +530,15 @@ const applyBlockedTools = async (
 
 /**
  * Sets (or preserves) the agent's permission rule for `toolName` (default
- * `task`), warning on clobber. Rule values are always the object form
- * `{ "<target>": "allow" | "deny" }` so opencode's `fromConfig` expansion
- * keeps them idempotent under `sameTaskRule`.
+ * `task`), warning on clobber. Rule values are either the object form
+ * `{ "<target>": "allow" | "deny" }` for pattern-scoped tools (`task`) or a
+ * plain action string for tools whose opencode schema only accepts an action
+ * (`todowrite`).
  */
 const applyTaskRule = async (
   entry: AgentLike,
   name: string,
-  rule: Record<string, "deny" | "allow">,
+  rule: Record<string, "deny" | "allow"> | string,
   log: LogFn,
   toolName = "task",
 ): Promise<void> => {
@@ -741,8 +748,10 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           if (level > 1) {
             // opencode strips todowrite from subagent sessions the same way
             // it strips task; every level's directive relies on it to track
-            // subtasks, so subagent levels must declare it explicitly.
-            await applyTaskRule(entry, name, { "*": "allow" }, log, "todowrite")
+            // subtasks, so subagent levels must declare it explicitly. Note:
+            // opencode's config schema only accepts a plain action for
+            // todowrite (no pattern-object form), hence the string.
+            await applyTaskRule(entry, name, "allow", log, "todowrite")
           }
           const marker = levelDirectiveMarker(level, depth)
           if (!entry.prompt?.includes(marker)) {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2 - 2026-08-04
+
+### Fixed
+
+- opencode would not start with `orchestratorDepth > 1` configured: the plugin wrote `permission.todowrite` as the pattern-object form `{ "*": "allow" }`, but opencode's config schema only accepts a plain action string for `todowrite` (`Expected PermissionActionConfig | undefined, got {"*":"allow"}`). Subagent orchestrator levels now declare `todowrite: "allow"`, which keeps the tool available at runtime (the schema's action form expands to the same `*: allow` rule) while passing config validation.
+
 ## 0.6.1 - 2026-08-04
 
 ### Fixed
