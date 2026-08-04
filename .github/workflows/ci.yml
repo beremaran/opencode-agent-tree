@@ -18,7 +18,9 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      - run: npm run check
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
 
   bun-smoke:
     runs-on: ubuntu-latest
@@ -26,6 +28,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
       - run: bun -e "await import('./src/index.ts').then(m => { if (typeof m.default !== 'function' || typeof m.OrchestratorPlugin !== 'function') throw new Error('plugin exports missing') })"
+      - run: bun test test/
 
   peer-drift:
     runs-on: ubuntu-latest

@@ -1,8 +1,13 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Config, Plugin } from "@opencode-ai/plugin"
 
 const PLUGIN_ID = "@beremaran/opencode-agent-tree"
 const DIRECTIVE_MARKER = "# Orchestrator Mode"
 
+/**
+ * Options accepted by the plugin's factory. The SDK `Plugin` type is not
+ * generic, so this interface documents the accepted option shape rather
+ * than flowing into the `options` parameter type.
+ */
 export interface OrchestratorOptions {
   /**
    * Model used for ALL delegated work — every subagent spawned via the
@@ -81,6 +86,14 @@ const DEFAULTS = {
  */
 const BUILTIN_SUBAGENTS = ["general", "explore"]
 
+/**
+ * Known built-in primary/system agents. Unlike BUILTIN_SUBAGENTS these are
+ * never routable, even when absent from the merged config, so candidates
+ * with these names are excluded from routing (and from the phantom-name
+ * warning).
+ */
+const KNOWN_BUILTINS = ["build", "plan", "compaction", "title", "summary"]
+
 const DIRECTIVE_TOOLS = ["task", "todowrite", "question", "read", "glob", "grep", "webfetch", "websearch"]
 
 const BLOCKED_TOOL_PATTERN = /^[a-z0-9_-]+$/
@@ -105,7 +118,7 @@ const nonEmptyString = (value: unknown, name: string): string => {
 }
 
 const optionalString = (value: unknown, name: string): string | undefined => {
-  if (value === undefined || value === "") return undefined
+  if (value === undefined || (typeof value === "string" && value.trim() === "")) return undefined
   return nonEmptyString(value, name)
 }
 
@@ -142,27 +155,34 @@ const validateBlockedTools = (names: string[]): string[] => {
   return names
 }
 
-const REQUIRED_MODEL_MESSAGE =
-  `[${PLUGIN_ID}] The \`subagentModel\` option is required, e.g. ["${PLUGIN_ID}", { "subagentModel": "anthropic/claude-sonnet-4-6" }]`
+const REQUIRED_MODEL_MESSAGE = `[${PLUGIN_ID}] The \`subagentModel\` option is required, e.g. ["${PLUGIN_ID}", { "subagentModel": "anthropic/claude-sonnet-4-6" }]`
 
 const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
   const candidate = rawOptions == null ? {} : rawOptions
   if (!isRecord(candidate)) invalidOption("options", "an object")
   const options = candidate as Record<string, unknown>
 
-  if (options.subagentModel === undefined || options.subagentModel === "") {
+  if (
+    options.subagentModel === undefined ||
+    (typeof options.subagentModel === "string" && options.subagentModel.trim() === "")
+  ) {
     throw new Error(REQUIRED_MODEL_MESSAGE)
   }
 
   const blockedTools = validateBlockedTools(
-    options.blockedTools === undefined ? [...DEFAULTS.blockedTools] : stringArray(options.blockedTools, "blockedTools"),
+    options.blockedTools === undefined
+      ? [...DEFAULTS.blockedTools]
+      : stringArray(options.blockedTools, "blockedTools"),
   )
   const agents = options.agents === undefined ? undefined : stringArray(options.agents, "agents")
   const orchestratorModel =
-    options.orchestratorModel === undefined || options.orchestratorModel === ""
+    options.orchestratorModel === undefined ||
+    options.orchestratorModel === null ||
+    options.orchestratorModel === ""
       ? undefined
       : modelString(options.orchestratorModel, "orchestratorModel")
-  const agentModels = options.agentModels === undefined ? {} : stringRecord(options.agentModels, "agentModels")
+  const agentModels =
+    options.agentModels === undefined ? {} : stringRecord(options.agentModels, "agentModels")
   for (const model of Object.values(agentModels)) modelString(model, "agentModels values")
 
   return {
@@ -173,7 +193,7 @@ const normalizeOptions = (rawOptions: unknown): NormalizedOptions => {
         ? DEFAULTS.orchestratorAgent
         : nonEmptyString(options.orchestratorAgent, "orchestratorAgent"),
     agents,
-    agentModels: options.agentModels === undefined ? {} : stringRecord(options.agentModels, "agentModels"),
+    agentModels,
     instructions: optionalString(options.instructions, "instructions"),
     blockedTools,
   }
@@ -220,8 +240,9 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
   return {
     config: async (cfg) => {
       try {
-        const agent = (cfg.agent ??= {}) as Record<string, AgentLike>
-        const hasAgent = (name: string) => Object.prototype.hasOwnProperty.call(agent, name)
+        if (cfg.agent == null) cfg.agent = {}
+        const agent = cfg.agent as Record<string, AgentLike>
+        const hasAgent = (name: string) => Object.hasOwn(agent, name)
         const getAgent = (name: string) => (hasAgent(name) ? agent[name] : undefined)
         const ensureAgent = (name: string) => {
           if (!hasAgent(name) || agent[name] == null) {
@@ -236,10 +257,20 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
         }
 
         const inScope = (name: string, def: AgentLike | undefined) =>
-          !def?.disable && isSubagentLike(def) && name !== opts.orchestratorAgent
+          !KNOWN_BUILTINS.includes(name) &&
+          !def?.disable &&
+          isSubagentLike(def) &&
+          name !== opts.orchestratorAgent
 
         if (getAgent(opts.orchestratorAgent)?.disable) {
-          throw new Error(`[${PLUGIN_ID}] The orchestrator agent \`${opts.orchestratorAgent}\` is disabled.`)
+          await client.app.log({
+            body: {
+              service: PLUGIN_ID,
+              level: "error",
+              message: `The orchestrator agent \`${opts.orchestratorAgent}\` is disabled; plugin will not apply its configuration.`,
+            },
+          })
+          return
         }
 
         const blockedDirectiveTools = DIRECTIVE_TOOLS.filter((tool) => opts.blockedTools.includes(tool))
@@ -269,11 +300,13 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
           })
         }
 
-        // Route every delegation target to the user-chosen model.
+        // Route every delegation target to the user-chosen model. Known
+        // built-in primaries (build, plan, compaction, title, summary) were
+        // already filtered out by inScope and never reach this loop.
         for (const name of targets) {
           const existed = hasAgent(name)
           const def = ensureAgent(name)
-          if (!existed && !BUILTIN_SUBAGENTS.includes(name)) {
+          if (!existed && !BUILTIN_SUBAGENTS.includes(name) && !KNOWN_BUILTINS.includes(name)) {
             await client.app.log({
               body: {
                 service: PLUGIN_ID,
@@ -288,7 +321,8 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
 
         // Configure the orchestrator: model, hard tool block, and the
         // delegation directive as its system prompt.
-        const orchestratorExisted = hasAgent(opts.orchestratorAgent) && getAgent(opts.orchestratorAgent) != null
+        const orchestratorExisted =
+          hasAgent(opts.orchestratorAgent) && getAgent(opts.orchestratorAgent) != null
         const orchestrator = ensureAgent(opts.orchestratorAgent)
         if (!orchestratorExisted) {
           await client.app.log({
@@ -299,17 +333,44 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
             },
           })
         }
-        orchestrator.mode ??= "primary"
+        const previousMode = orchestrator.mode
+        if (orchestrator.mode !== "primary") {
+          orchestrator.mode = "primary"
+          if (previousMode !== undefined) {
+            await client.app.log({
+              body: {
+                service: PLUGIN_ID,
+                level: "warn",
+                message: `Converting agent "${opts.orchestratorAgent}" mode "${previousMode}" to "primary" for orchestrator use`,
+              },
+            })
+          }
+        }
         if (opts.orchestratorModel) orchestrator.model = opts.orchestratorModel
         if (opts.blockedTools.length > 0) {
-          const permission = { ...orchestrator.permission }
+          const rawPermission = orchestrator.permission
+          let permission: Record<string, unknown>
+          if (!isRecord(rawPermission)) {
+            await client.app.log({
+              body: {
+                service: PLUGIN_ID,
+                level: "warn",
+                message: `Orchestrator agent "${opts.orchestratorAgent}" has a non-object permission; replacing it with an empty permission object`,
+              },
+            })
+            permission = {}
+          } else {
+            permission = { ...rawPermission }
+          }
           for (const tool of opts.blockedTools) {
             if (permission[tool] !== undefined && permission[tool] !== "deny") {
               await client.app.log({
                 body: {
                   service: PLUGIN_ID,
                   level: "warn",
-                  message: `Overwriting existing permission for tool "${tool}" on agent "${opts.orchestratorAgent}" with "deny"`,
+                  message: isRecord(permission[tool])
+                    ? `Overwriting existing command-scoped rules for tool "${tool}" on agent "${opts.orchestratorAgent}" with blanket "deny"`
+                    : `Overwriting existing permission for tool "${tool}" on agent "${opts.orchestratorAgent}" with "deny"`,
                 },
               })
             }
@@ -332,13 +393,14 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
               routedAgents: targets,
               orchestratorModel: orchestrator.model ?? cfg.model ?? "(default)",
               blockedTools: [...opts.blockedTools],
+              defaultAgent: (cfg as Config & { default_agent?: string }).default_agent ?? "(unset)",
             },
           },
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : `[${PLUGIN_ID}] Unexpected error in config hook.`
+        const message =
+          error instanceof Error ? error.message : `[${PLUGIN_ID}] Unexpected error in config hook.`
         await client.app.log({ body: { service: PLUGIN_ID, level: "error", message } })
-        throw error
       }
     },
   }

@@ -81,14 +81,35 @@ From npm:
 
 > Config is loaded at startup. **Restart opencode** after adding the plugin.
 
+## Getting started: pick your default agent
+
+Installing the plugin **creates the `Manager` agent but does not make it your
+default agent**. opencode still starts in whatever mode your config selects
+(the built-in `build` agent by default, or whatever `default_agent` names)
+until you choose the orchestrator.
+
+To always start in orchestrator mode, set the default agent in `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "Manager",
+  "plugin": ["@beremaran/opencode-agent-tree", { "subagentModel": "anthropic/claude-sonnet-4-6" }]
+}
+```
+
+Alternatively, pick `Manager` in the agent picker at the start of each session.
+The startup log reports the effective default agent (`defaultAgent` in the
+summary entry's extra metadata) so you can confirm which mode a session runs in.
+
 ## Options
 
 | Option              | Type                 | Default                          | Description |
 | ------------------- | -------------------- | -------------------------------- | ----------- |
 | `subagentModel`     | `string`             | **required**                     | Model for all delegated work, e.g. `"anthropic/claude-sonnet-4-6"`. Must be `provider/model` format. Agents with an explicit `model` in `opencode.json` are never overridden. See [Model precedence](#model-precedence). |
 | `orchestratorModel` | `string`             | agent model, else `model`        | Model for the orchestrator itself. Unconditionally overrides an explicit model on the orchestrator agent. |
-| `orchestratorAgent` | `string`             | `"Manager"`                      | Which agent acts as the orchestrator. Created by the plugin if it does not exist (it shows up in the agent picker under this name). Built-in agents are left untouched by default; if you name an existing agent, the plugin converts it instead. |
-| `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. Disabled agents, primary-mode agents, and the orchestrator itself are filtered out even if listed. |
+| `orchestratorAgent` | `string`             | `"Manager"`                      | Which agent acts as the orchestrator. Created by the plugin if it does not exist (it shows up in the agent picker under this name). If you name an existing agent, the plugin **converts it** to a primary agent: its `mode` is set to `"primary"` unconditionally, and a warning is logged if it previously had an explicit non-primary mode. Built-in primary agents are left untouched by default. |
+| `agents`            | `string[]`           | all `subagent`/`all`-mode agents | Only these agents get `subagentModel`. Disabled agents, primary-mode agents, the built-in primaries (`build`, `plan`, `compaction`, `title`, `summary`), and the orchestrator itself are filtered out even if listed — none of them are ever routed to `subagentModel`, and they never trigger the phantom-name warning. |
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. Never applies to the orchestrator agent (it is never routed). |
 | `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
 | `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. Names must match `[a-z0-9_-]+`. |
@@ -107,6 +128,8 @@ The orchestrator is asymmetric:
   orchestrator agent.
 - An `agentModels` entry keyed to the orchestrator agent name is silently
   ignored — the orchestrator is never routed.
+- Built-in primary agents (`build`, `plan`, `compaction`, `title`, `summary`)
+  are never routed either, so `agentModels` entries for them are never applied.
 
 ## Example
 
@@ -132,17 +155,27 @@ The orchestrator is asymmetric:
 ## Validation & warnings
 
 At startup the plugin validates the configuration and reports self-contradictory
-setups. Invalid configuration raises a config error (logged at `error` level via
-`app.log`, then rethrown); the remaining cases log a `warn` message and
-continue.
+setups. There are two distinct failure modes:
+
+- **Factory-level option errors** — a missing `subagentModel`, an invalid
+  `provider/model` format, or a malformed `blockedTools` entry is logged at
+  `error` level and rethrown, aborting plugin load. opencode surfaces these as
+  config errors.
+- **Config-hook conditions** — such as a disabled orchestrator agent — **never
+  throw**. The plugin logs an `error` and simply does not apply its
+  configuration, so opencode continues with the original config. The plugin
+  cannot crash opencode through the config hook.
+
+Everything else logs a `warn` message and continues.
 
 | Condition | Result |
 | --------- | ------ |
-| The orchestrator agent named by `orchestratorAgent` is disabled | Config error |
-| `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (at least one `/`, non-empty on both sides; further slashes are allowed in the model part) | Config error |
-| A `blockedTools` name does not match `[a-z0-9_-]+` (lowercase letters, digits, underscore, hyphen) | Config error |
+| The orchestrator agent named by `orchestratorAgent` is disabled | Error logged; the plugin's config is **not applied**; opencode continues with the original config |
+| `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (at least one `/`, non-empty on both sides; further slashes are allowed in the model part) | Config error, plugin load aborts |
+| A `blockedTools` name does not match `[a-z0-9_-]+` (lowercase letters, digits, underscore, hyphen) | Config error, plugin load aborts |
 | `blockedTools` includes a directive-dependent tool (`task`, `todowrite`, `question`, `read`, `glob`, `grep`, `webfetch`, `websearch`) | Warning: the orchestrator is told to delegate with a tool it cannot use |
-| A blocked tool's existing permission on the orchestrator agent is overwritten with `deny` | Warning naming the tool and agent |
+| A blocked tool's existing permission on the orchestrator agent is a plain value other than `deny` and is overwritten with `deny` | Warning naming the tool and agent (an existing value that is already `deny` is not warned about) |
+| A blocked tool's existing permission on the orchestrator agent is command-scoped (an object of rules) and is replaced by a blanket `deny` | Separate warning naming the tool and agent |
 | An explicit `agents` list omits both built-in subagents (`general`, `explore`) | Warning: routing and the directive diverge |
 | `agents` contains a name that is neither a built-in subagent nor an agent in `opencode.json` | Warning: a phantom agent entry is created (typo protection) |
 
@@ -180,18 +213,24 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 - **Restart after config changes.** Options are read at startup; edit
   `opencode.json` and restart opencode to apply them.
 - **Check the startup log line.** A healthy load logs
-  `Orchestrator "Manager" enabled; subagents -> <subagentModel>`.
-- **`The orchestrator agent "Manager" is disabled`** is a config error: the agent
-  named by `orchestratorAgent` has `disable: true`. Enable it or choose another
-  orchestrator.
-- **A warning you did not expect** — the four warning cases above log at
-  `warn` level naming the offending tool, agent, or config value; the config is
+  `Orchestrator "Manager" enabled; subagents -> <subagentModel>`, with extra
+  metadata (`routedAgents`, `orchestratorModel`, `blockedTools`,
+  `defaultAgent`) naming what was routed and which agent is the session
+  default.
+- **`The orchestrator agent "Manager" is disabled`** is logged as an error and
+  the plugin's configuration is **not applied** — but opencode continues
+  normally with the rest of your config. Enable the agent, or choose another
+  orchestrator, to get the plugin's behavior back.
+- **A warning you did not expect** — the warning cases above log at `warn`
+  level naming the offending tool, agent, or config value; the config is
   probably not doing what you intend.
 - **"My explicitly-configured agent model is not used"** — for the orchestrator
   this is expected: `orchestratorModel` unconditionally overrides it, and
   `agentModels` entries keyed to it are ignored. For subagents, an explicit
   `model` in `opencode.json` wins over `agentModels` and `subagentModel` by
-  design. See [Model precedence](#model-precedence).
+  design. Built-in primaries (`build`, `plan`, `compaction`, `title`,
+  `summary`) are never routed, so configuring a model for them has no effect
+  either. See [Model precedence](#model-precedence).
 
 ## Notes
 
@@ -203,7 +242,9 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 - By default the orchestrator agent is **created by the plugin** as `Manager`
   (visible in the agent picker under that name); no built-in agent is touched.
   If you set `orchestratorAgent` to an existing agent (e.g. `build`), the plugin
-  converts that agent into the orchestrator instead.
+  converts that agent into the orchestrator instead: its `mode` is forced to
+  `"primary"` and a warning is logged if it previously had an explicit
+  non-primary mode.
 - **Migrating from <=0.4.x:** older versions converted the built-in `build`
   agent by default. That conversion is not undone on upgrade — `build` keeps the
   `# Orchestrator Mode` directive in its prompt because the marker only prevents
@@ -214,7 +255,7 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 
 ```bash
 npm install
-npm run check
+npm run check   # typecheck + lint + tests
 ```
 
 The plugin is a single `config` hook (`src/index.ts`): it mutates the merged opencode config at startup — routing subagent models, denying the orchestrator's hands-on tools, and installing the directive prompt. To verify against a live opencode, run from this repo (its `opencode.json` is pre-wired) and watch for the startup log line:
@@ -223,14 +264,43 @@ The plugin is a single `config` hook (`src/index.ts`): it mutates the merged ope
 Orchestrator "Manager" enabled; subagents -> <subagentModel>
 ```
 
+See [RELEASING.md](RELEASING.md) for the release process.
+
 ## Publishing
 
+Releases are **tag-triggered from CI**, not local `npm publish`:
+
 ```bash
-npm login
-npm publish
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-The package ships raw TypeScript (`main: src/index.ts`) — opencode loads plugins with Bun, so no build step is needed. The repository and author metadata are already set in `package.json`.
+Pushing the tag runs `.github/workflows/publish.yml`, which:
+
+1. Verifies the tag matches `package.json` and that `CHANGELOG.md` documents
+   the released version.
+2. Installs dependencies and runs the full check suite (`npm run check`).
+3. Inspects the packed tarball and asserts it contains exactly the expected
+   files (`LICENSE`, `README.md`, `package.json`, `src/index.ts`).
+4. Smoke-tests the tarball from a clean consumer install — a temp directory
+   with `npm init -y` + `npm install <tarball>` — importing **by package name**
+   under **Bun** (the same runtime opencode uses to load plugins) and asserting
+   the default and named exports are functions.
+5. Publishes to npm using the `NPM_TOKEN` secret with **npm provenance**
+   (`publishConfig.provenance` + `id-token: write`).
+6. Creates a GitHub Release (via `softprops/action-gh-release`) whose body is
+   the CHANGELOG section for the released version.
+
+**npm provenance requires the CI path.** A local `npm publish` is not the
+supported flow: it will not produce provenance and bypasses the release
+checks. If you do run it, `prepublishOnly` runs `npm run check` first, but
+prefer the tag flow.
+
+The `types` entry (`./src/index.ts`) is intentionally the raw TypeScript
+source: opencode loads plugins with Bun, so the published package ships `.ts`
+directly with no build step. The same applies to `main`. The `./package.json`
+export is included so consumers can read package metadata without a resolver
+round-trip.
 
 ## License
 

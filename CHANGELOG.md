@@ -2,9 +2,33 @@
 
 ## Unreleased
 
+### Changed
+
+- Built-in primary agents (`build`, `plan`, `compaction`, `title`, `summary`) are never routed to `subagentModel` and never trigger the phantom-agent warning, even when listed in `agents`. `general` and `explore` remain the routable built-in subagents.
+- An existing `orchestratorAgent` is converted to primary mode unconditionally; a warning is logged when it previously had an explicit non-primary mode.
+- The config hook no longer throws: a disabled orchestrator agent logs an error and the plugin's configuration is not applied, but opencode continues with the original config. Factory-level invalid options still raise a config error that aborts plugin load.
+- Permission merging is hardened: overwriting an existing non-`deny` plain permission warns; command-scoped (object) rules replaced by a blanket `deny` warn separately; values already set to `deny` are not re-warned; and a non-object `permission` is replaced with an empty object (with a warning).
+- The startup summary log now reports the effective `defaultAgent` in its extra metadata.
+
+### Fixed
+
+- Validation is now consistent: empty-string handling for `subagentModel`, `orchestratorModel`, and `instructions` matches across the factory and the config hook.
+- The README's claim that disabled agents, primary-mode agents, and the orchestrator itself are filtered out of an explicit `agents` list even if listed is now accurate and stays.
+
+### Added
+
+- Exported `OrchestratorOptions` type in `src/index.ts` for typed plugin options.
+- Biome linting (`npm run lint` runs `biome check src test`); `npm run check` now runs typecheck, lint, and tests; CI runs lint and runs the test suite under Bun.
+- `prepublishOnly` runs the full check suite before publishing.
+- `sideEffects: false`, `homepage`, `bugs`, and a `./package.json` export in `package.json`, plus `@types/node` and `@biomejs/biome` dev dependencies.
+- `RELEASING.md` documenting the tag-triggered release flow.
+- Dependabot batching (`open-pull-requests-limit: 5` and update groups), and `*.tgz` in `.gitignore`.
+- The publish workflow verifies the CHANGELOG entry for the released version, asserts the packed file list, smoke-tests the tarball from a clean consumer install, and creates a GitHub Release from the CHANGELOG section.
+- Tests were converted to TypeScript and expanded to cover the new routing, conversion, permission, and config-hook behaviors.
+
 ## 0.5.0 - 2026-08-04
 
-### Changed
+### Changed (Breaking)
 
 - The default orchestrator agent is now `Manager`, created by the plugin when it does not exist; built-in agents (`build`, `plan`) are no longer modified by default.
 - When the orchestrator agent does not exist, startup logs `Creating orchestrator agent "Manager"` (idempotent across config-hook re-runs).

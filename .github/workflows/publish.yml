@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -39,6 +39,12 @@ jobs:
           PACKAGE_VERSION="$(node -p 'require("./package.json").version')"
           test "$PACKAGE_NAME" = "@beremaran/opencode-agent-tree"
           test "$RELEASE_TAG" = "v$PACKAGE_VERSION"
+          # A release tag must have a matching CHANGELOG entry. "Unreleased"
+          # is never a tag, so the version here is always concrete.
+          grep -q "## $PACKAGE_VERSION" CHANGELOG.md || {
+            echo "CHANGELOG.md has no entry for $PACKAGE_VERSION" >&2
+            exit 1
+          }
 
       - name: Install dependencies
         run: npm ci
@@ -47,14 +53,72 @@ jobs:
         run: npm run check
 
       - name: Inspect package contents
-        run: npm pack --dry-run
+        run: |
+          # Assert the packed tarball contains exactly the expected files:
+          # LICENSE, README.md, package.json, src/index.ts.
+          npm pack --dry-run --json > pack-info.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs"
+            const [entry] = JSON.parse(readFileSync("pack-info.json", "utf8"))
+            const actual = entry.files.map((f) => f.path).sort()
+            const expected = ["LICENSE", "README.md", "package.json", "src/index.ts"].sort()
+            if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+              console.error("packed file mismatch")
+              console.error("expected: " + expected.join(", "))
+              console.error("actual:   " + actual.join(", "))
+              process.exit(1)
+            }
+          '
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Smoke-test packed tarball
         run: |
-          npm pack
-          mkdir -p /tmp/agent-tree-pkg
-          tar -xzf *.tgz -C /tmp/agent-tree-pkg
-          node --experimental-strip-types -e "import('/tmp/agent-tree-pkg/package/src/index.ts').then(m => { if (typeof m.default !== 'function') process.exit(1) })"
+          # Install the tarball in a clean consumer and import it by package
+          # name with Bun. opencode itself loads plugins with Bun, so this is
+          # the most faithful smoke test and avoids Node's type-stripping
+          # restriction for .ts files under node_modules
+          # (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING): Bun natively runs
+          # the raw .ts main. The import resolves by package name and asserts
+          # both the default and named exports are functions.
+          REPO_ROOT="$PWD"
+          TARBALL="$(npm pack --silent)"
+          CONSUMER_DIR="$(mktemp -d)"
+          cd "$CONSUMER_DIR"
+          npm init -y
+          npm install "$REPO_ROOT/$TARBALL"
+          bun -e "await import('@beremaran/opencode-agent-tree').then(m => { if (typeof m.default !== 'function' || typeof m.OrchestratorPlugin !== 'function') process.exit(1) })"
+
+      - name: Extract CHANGELOG section for release body
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs"
+            const version = process.env.RELEASE_TAG.replace(/^v/, "")
+            const text = readFileSync("CHANGELOG.md", "utf8")
+            const header = "## " + version
+            const start = text.indexOf(header)
+            if (start === -1) {
+              console.error(`no CHANGELOG section for ${version}`)
+              process.exit(1)
+            }
+            // Skip the full heading line (e.g. "## 0.5.0 - 2026-08-04").
+            const lineEnd = text.indexOf("\n", start)
+            const from = lineEnd === -1 ? text.length : lineEnd + 1
+            const next = text.indexOf("\n## ", from)
+            const section = (next === -1 ? text.slice(from) : text.slice(from, next)).trim()
+            writeFileSync("/tmp/release-body.md", section + "\n")
+          '
 
       - name: Publish package
         run: npm publish
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: /tmp/release-body.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

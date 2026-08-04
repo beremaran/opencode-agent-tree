@@ -42,3 +42,8 @@ Orchestrator "Manager" enabled; subagents -> <subagentModel>
 - If you change the directive prompt (`orchestratorDirective` in `src/index.ts`),
   update the copy in `README.md` to match.
 - Update `package.json` `version` only when asked to prepare a release.
+
+## Releases
+
+Releases are tag-triggered from CI — see [RELEASING.md](RELEASING.md) for the
+full flow (bump version, add a CHANGELOG entry, tag `vX.Y.Z`, push the tag).

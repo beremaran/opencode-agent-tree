@@ -7,24 +7,32 @@
   },
   "description": "Force opencode to act as an orchestrator: every task is decomposed and delegated to subagents, with user-configurable models per agent.",
   "type": "module",
+  "sideEffects": false,
   "main": "src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "src"
   ],
+  "homepage": "https://github.com/beremaran/opencode-agent-tree",
+  "bugs": {
+    "url": "https://github.com/beremaran/opencode-agent-tree/issues"
+  },
   "engines": {
     "node": ">=22.6"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types test/index.test.mjs",
-    "check": "npm run typecheck && npm test"
+    "test": "node --experimental-strip-types --test test/index.test.ts",
+    "lint": "biome check src test",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "prepublishOnly": "npm run check"
   },
   "keywords": [
     "opencode",
@@ -48,7 +56,9 @@
     "@opencode-ai/plugin": ">=1.18.11 <2"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
     "@opencode-ai/plugin": "1.18.11",
+    "@types/node": "^26.1.2",
     "typescript": "^5.6.0"
   }
 }
