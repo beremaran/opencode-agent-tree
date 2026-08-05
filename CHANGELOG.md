@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 - 2026-08-06
+
+### Changed
+
+- All orchestrator directive levels (single-level and `orchestratorDepth` chains) now explicitly nudge small-chunk decomposition: subtasks must be small (one concern, few files, verifiable in one focused pass), monolith-to-single-subagent delegation is prohibited, and independent subtasks should fan out to several small subagents in parallel instead of one large delegation.
+
 ## 0.6.2 - 2026-08-04
 
 ### Fixed
@@ -48,12 +54,6 @@
 - New `restrictTask` option: when `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents (closes the "delegate to an unrestricted agent" loophole).
 - GitHub issue templates (`bug_report`, `feature_request`) and a pull request template.
 - `npm run test:coverage` script, and `CHANGELOG.md` included in the published package `files`.
-
-## Unreleased
-
-### Changed
-
-- All orchestrator directive levels (single-level and `orchestratorDepth` chains) now explicitly nudge small-chunk decomposition: subtasks must be small (one concern, few files, verifiable in one focused pass), monolith-to-single-subagent delegation is prohibited, and independent subtasks should fan out to several small subagents in parallel instead of one large delegation.
 
 ## 0.5.0 - 2026-08-04
 
