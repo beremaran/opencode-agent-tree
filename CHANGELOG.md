@@ -49,6 +49,12 @@
 - GitHub issue templates (`bug_report`, `feature_request`) and a pull request template.
 - `npm run test:coverage` script, and `CHANGELOG.md` included in the published package `files`.
 
+## Unreleased
+
+### Changed
+
+- All orchestrator directive levels (single-level and `orchestratorDepth` chains) now explicitly nudge small-chunk decomposition: subtasks must be small (one concern, few files, verifiable in one focused pass), monolith-to-single-subagent delegation is prohibited, and independent subtasks should fan out to several small subagents in parallel instead of one large delegation.
+
 ## 0.5.0 - 2026-08-04
 
 ### Changed (Breaking)

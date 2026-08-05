@@ -223,6 +223,17 @@ test("disabled orchestrator agent logs an error without throwing and makes no mu
   assert.equal(warns(logs).length, 0)
 })
 
+test("directive nudges small-chunk decomposition and parallel fan-out", async () => {
+  const { config } = await apply({ subagentModel: "provider/model" }, { agent: {} })
+
+  const prompt = promptOf(config, "Manager")
+  assert.match(prompt, /Keep subtasks SMALL\./)
+  assert.match(prompt, /never hand a monolithic task to a single subagent/)
+  assert.match(prompt, /Never bundle several subtasks into one delegation/)
+  assert.match(prompt, /more, smaller subagents in parallel beats one big delegation/)
+  assert.match(prompt, /When in doubt, split again/)
+})
+
 test("directive is appended to an existing orchestrator prompt", async () => {
   const { config } = await apply(
     { subagentModel: "provider/model" },
