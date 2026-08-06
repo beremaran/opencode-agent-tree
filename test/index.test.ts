@@ -36,7 +36,20 @@ type TestConfig = {
   agent: Record<string, TestAgent>
 }
 
-const createInput = () => {
+// Session method mocks for the runtime-guardrail hook tests. The real client
+// exposes `session.get`, `session.messages`, and `session.todo` (via
+// `createOpencodeClient`); the default implementations return benign data so
+// config-only tests never observe them.
+type SessionMocks = {
+  get?: (options: { path: { id: string } }) => Promise<{ data?: Record<string, unknown> }>
+  messages?: (options: {
+    path: { id: string }
+    query: { limit: number }
+  }) => Promise<{ data?: Array<{ info: Record<string, unknown>; parts: Array<Record<string, unknown>> }> }>
+  todo?: (options: { path: { id: string } }) => Promise<{ data?: unknown[] }>
+}
+
+const createInput = (sessionMocks: SessionMocks = {}) => {
   const logs: LogEntry[] = []
   return {
     input: {
@@ -45,6 +58,11 @@ const createInput = () => {
           log: async (entry: LogEntry) => {
             logs.push(entry)
           },
+        },
+        session: {
+          get: sessionMocks.get ?? (async () => ({ data: undefined })),
+          messages: sessionMocks.messages ?? (async () => ({ data: undefined })),
+          todo: sessionMocks.todo ?? (async () => ({ data: [] })),
         },
       },
     } as unknown as PluginInput,
@@ -1486,4 +1504,201 @@ test("explicit subagent_depth 0 warns even for orchestratorDepth 1", async () =>
   const warnings = warnMatching(logs, /subagent_depth/)
   assert.equal(warnings.length, 1)
   assert.deepEqual(warnings[0].body.extra, { orchestratorDepth: 1, subagentDepth: 0 })
+})
+
+// ─── tool.execute.before runtime guardrails ──────────────────────────────────
+
+// Returns a plugin instance plus its `tool.execute.before` hook, with the
+// client's session methods stubbed to the given mocks.
+const createToolHook = async (options: Record<string, unknown>, sessionMocks: SessionMocks = {}) => {
+  const { input, logs } = createInput(sessionMocks)
+  const pluginHooks = await OrchestratorPlugin(input, options)
+  const hook = pluginHooks["tool.execute.before"]
+  assert.ok(hook, 'plugin must expose a "tool.execute.before" hook')
+  return { hook, logs }
+}
+
+// A user message shaped like the SDK's `{ info: Message; parts: Part[] }`.
+const userMessageOf = (text: string, agent = "Manager") => ({
+  info: { role: "user", agent },
+  parts: [{ type: "text", text }],
+})
+
+// A TODO item shaped like the SDK's `Todo`.
+const todoOf = (content: string) => ({
+  content,
+  status: "pending",
+  priority: "high",
+  id: content,
+})
+
+test("directive includes the DISCOVER -> PLAN -> DISPATCH workflow", async () => {
+  const { config } = await apply({ subagentModel: "provider/model" }, { agent: {} })
+
+  const prompt = promptOf(config, "Manager")
+  assert.match(prompt, /## Mandatory execution flow/)
+  assert.match(prompt, /\*\*DISCOVER\*\*/)
+  assert.match(prompt, /\*\*PLAN\*\*/)
+  assert.match(prompt, /\*\*DISPATCH\*\*/)
+})
+
+test("mandatory execution flow appears only on top and final chain levels", async () => {
+  const { config } = await apply({ subagentModel: "provider/model", orchestratorDepth: 3 }, { agent: {} })
+
+  // Only the final level of the chain gets the workflow; level 1 of a
+  // multi-level chain and the intermediate level 2 are structurally pinned to
+  // the next level, so the workflow is not rendered for them.
+  assert.match(promptOf(config, "Manager-3"), /\*\*DISCOVER\*\*/)
+  assert.match(promptOf(config, "Manager-3"), /\*\*DISPATCH\*\*/)
+  assert.equal(promptOf(config, "Manager").includes("Mandatory execution flow"), false)
+  assert.equal(promptOf(config, "Manager").includes("DISPATCH"), false)
+  assert.equal(promptOf(config, "Manager-2").includes("Mandatory execution flow"), false)
+  assert.equal(promptOf(config, "Manager-2").includes("DISPATCH"), false)
+})
+
+test('the plugin exposes a "tool.execute.before" hook', async () => {
+  const { input } = createInput()
+  const hooks = await OrchestratorPlugin(input, { subagentModel: "provider/model" })
+
+  assert.equal(typeof hooks["tool.execute.before"], "function")
+})
+
+test("the hook rejects a monolithic task prompt that copies the root request", async () => {
+  const root =
+    "Refactor the authentication module to use the new token-based session handling approach for all users across the entire application codebase today please"
+  const { hook, logs } = await createToolHook(
+    { subagentModel: "provider/model" },
+    {
+      get: async () => ({ data: { agent: "Manager" } }),
+      messages: async () => ({ data: [userMessageOf(root)] }),
+      todo: async () => ({ data: [todoOf("one"), todoOf("two")] }),
+    },
+  )
+
+  await assert.rejects(
+    () =>
+      hook(
+        { tool: "task", sessionID: "s1", callID: "c1" },
+        { args: { prompt: `${root} all at once without splitting anything` } },
+      ),
+    /monolithic copy of the user's request/,
+  )
+  assert.equal(warnMatching(logs, /Delegation rejected/).length, 1)
+})
+
+test("the hook rejects a long task prompt without explicit file/module scope", async () => {
+  const longBrief =
+    "Please implement the entire feature end to end covering every single aspect including edge cases performance considerations error handling retries logging observability documentation tests and validation across the whole system in one pass without breaking anything that already works today"
+  assert.ok(longBrief.length > 200, "fixture brief must exceed the 200-char threshold")
+  const { hook } = await createToolHook(
+    { subagentModel: "provider/model" },
+    {
+      get: async () => ({ data: { agent: "Manager" } }),
+      messages: async () => ({ data: undefined }),
+      todo: async () => ({ data: [todoOf("one"), todoOf("two")] }),
+    },
+  )
+
+  await assert.rejects(
+    () => hook({ tool: "task", sessionID: "s1", callID: "c1" }, { args: { prompt: longBrief } }),
+    /lacks explicit target file, directory, or module scope/,
+  )
+})
+
+test("the hook rejects a task call when fewer than 2 TODOs exist", async () => {
+  const { hook, logs } = await createToolHook(
+    { subagentModel: "provider/model" },
+    {
+      get: async () => ({ data: { agent: "Manager" } }),
+      messages: async () => ({ data: undefined }),
+      todo: async () => ({ data: [todoOf("only one")] }),
+    },
+  )
+
+  await assert.rejects(
+    () =>
+      hook(
+        { tool: "task", sessionID: "s1", callID: "c1" },
+        { args: { prompt: "Fix the bug in src/auth.ts by updating the token refresh logic." } },
+      ),
+    /at least 2 TODO items/,
+  )
+  assert.equal(warnMatching(logs, /Delegation rejected/).length, 1)
+})
+
+test("the hook allows a valid granular task call with TODOs present", async () => {
+  const { hook, logs } = await createToolHook(
+    { subagentModel: "provider/model" },
+    {
+      get: async () => ({ data: { agent: "Manager" } }),
+      messages: async () => ({ data: undefined }),
+      todo: async () => ({ data: [todoOf("one"), todoOf("two")] }),
+    },
+  )
+
+  await assert.doesNotReject(() =>
+    hook(
+      { tool: "task", sessionID: "s1", callID: "c1" },
+      { args: { prompt: "Fix the bug in src/auth.ts by updating the token refresh logic." } },
+    ),
+  )
+  assert.equal(warnMatching(logs, /Delegation rejected/).length, 0)
+})
+
+test("the hook is skipped for non-orchestrator agents", async () => {
+  const { hook, logs } = await createToolHook(
+    { subagentModel: "provider/model" },
+    {
+      get: async () => ({ data: { agent: "general" } }),
+      messages: async () => ({ data: undefined }),
+      todo: async () => ({ data: [] }),
+    },
+  )
+
+  // Even a monolithic prompt with no TODOs is allowed for a non-orchestrator.
+  await assert.doesNotReject(() =>
+    hook(
+      { tool: "task", sessionID: "s1", callID: "c1" },
+      { args: { prompt: "Just do everything at once for the entire application please" } },
+    ),
+  )
+  assert.equal(warnMatching(logs, /Delegation rejected/).length, 0)
+})
+
+test("the hook infers the orchestrator agent from recent messages when the session has no agent", async () => {
+  const { hook, logs } = await createToolHook(
+    { subagentModel: "provider/model" },
+    {
+      get: async () => ({ data: { id: "s1", title: "t" } }),
+      messages: async (options) =>
+        options.query.limit === 5 ? { data: [userMessageOf("anything", "Manager")] } : { data: undefined },
+      todo: async () => ({ data: [todoOf("one"), todoOf("two")] }),
+    },
+  )
+
+  await assert.doesNotReject(() =>
+    hook(
+      { tool: "task", sessionID: "s1", callID: "c1" },
+      { args: { prompt: "Fix the bug in src/auth.ts by updating the token refresh logic." } },
+    ),
+  )
+  assert.equal(warnMatching(logs, /Delegation rejected/).length, 0)
+})
+
+test("the hook does not intercept non-task tools", async () => {
+  const { hook, logs } = await createToolHook(
+    { subagentModel: "provider/model" },
+    {
+      get: async () => ({ data: { agent: "Manager" } }),
+      messages: async () => ({ data: undefined }),
+      todo: async () => ({ data: [] }),
+    },
+  )
+
+  for (const tool of ["read", "bash", "edit", "todowrite"]) {
+    await assert.doesNotReject(() =>
+      hook({ tool, sessionID: "s1", callID: "c1" }, { args: { prompt: "anything" } }),
+    )
+  }
+  assert.equal(warnMatching(logs, /Delegation rejected/).length, 0)
 })

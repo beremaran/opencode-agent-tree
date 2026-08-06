@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 - 2026-08-06
+
+### Added
+
+- Runtime enforcement of small-chunk delegation via the new `tool.execute.before` hook. Orchestrator `task` calls are now validated before execution.
+- Rejection of monolithic copy-paste prompts: a subtask brief that overlaps the root user request by more than 75% of meaningful words is blocked.
+- Rejection of unscoped long briefs: a subtask prompt longer than 200 characters must name explicit files, directories, or module boundaries.
+- `todowrite` prerequisite: at least 2 TODO items must exist in the session before the orchestrator can dispatch a subagent.
+
+### Changed
+
+- The orchestrator directive now includes a `## Mandatory execution flow` (DISCOVER → PLAN → DISPATCH) section for the top-level and final-chain-level directives, turning the negative constraints into a positive step-by-step loop.
+
 ## 0.7.0 - 2026-08-06
 
 ### Changed

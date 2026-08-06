@@ -1,4 +1,5 @@
 import type { Config, Plugin } from "@opencode-ai/plugin"
+import type { Message, Part, TextPart } from "@opencode-ai/sdk"
 
 const PLUGIN_ID = "@beremaran/opencode-agent-tree"
 
@@ -365,6 +366,54 @@ const orchestratorLevels = (opts: NormalizedOptions): string[] => {
   return names
 }
 
+// Extract meaningful words (>=4 chars) as a Set
+const wordSet = (text: string): Set<string> => new Set(text.toLowerCase().match(/\b[a-z0-9_-]{4,}\b/g) || [])
+
+// Returns overlap ratio of meaningful words between subtask and root prompt
+const promptOverlapRatio = (subtask: string, root: string): number => {
+  if (!root || root.length < 50) return 0
+  const rootWords = wordSet(root)
+  const subtaskWords = wordSet(subtask)
+  if (rootWords.size === 0) return 0
+  let shared = 0
+  for (const word of rootWords) {
+    if (subtaskWords.has(word)) shared++
+  }
+  return shared / rootWords.size
+}
+
+// Detect explicit file/directory/module scope in a brief
+const hasExplicitScope = (text: string): boolean =>
+  /[\w-]+\.(ts|js|tsx|jsx|py|rs|go|java|kt|swift|json|md|css|html|yaml|yml)|\b(src|test|tests|lib|bin|app|public|private|internal|components?|utils?|helpers?|hooks?|types?|config|scripts|docs|examples|fixtures|mocks|packages|workspaces)\/|file:|path:|module:|directory:/i.test(
+    text,
+  )
+
+// Extract user text from the most recent user message parts
+const userTextFromMessages = (messages: Array<{ info: Message; parts: Part[] }> | undefined): string => {
+  if (!messages) return ""
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const { info, parts } = messages[i]
+    if (info.role !== "user") continue
+    const texts = parts
+      .filter((part: Part): part is TextPart => part.type === "text")
+      .map((part) => part.text)
+    return texts.join(" ").trim()
+  }
+  return ""
+}
+
+/**
+ * Positive DISCOVER -> PLAN -> DISPATCH workflow injected into the top-level
+ * (depth 1) and final-chain-level directives, between the non-negotiable rules
+ * and the sizing/tool guidance. Intermediate chain levels do not get it: their
+ * only `task` target is the next level, so the workflow is not actionable
+ * there.
+ */
+const MANDATORY_FLOW_SECTION = `## Mandatory execution flow
+1. **DISCOVER**: Use \`explore\`, \`glob\`, \`grep\`, or \`read\` to identify all affected files. Do NOT delegate implementation until file paths are known.
+2. **PLAN**: Write a list of 2+ atomic subtasks into \`todowrite\`, assigning exact files to each subtask.
+3. **DISPATCH**: Call \`task\` once per subtask in parallel (or sequentially if dependent). Each brief must include explicit file paths or module boundaries.`
+
 /**
  * Renders the level-aware orchestrator directive.
  *
@@ -402,6 +451,8 @@ You are the ORCHESTRATOR. You do not do hands-on work. You plan, decompose, dele
 7. Review every subagent report. If work is incomplete or wrong, delegate the fix to a subagent — never fix it yourself.
 8. Reuse a running subagent via its task_id when follow-up work belongs to the same context.
 9. Keep the user informed: report what was delegated to whom, the results, blockers, and the final state.
+
+${MANDATORY_FLOW_SECTION}
 
 ## Subtask sizing
 - Split a request along its seams: separate files, functions, concerns, or verification steps each become their own subtask.
@@ -460,6 +511,8 @@ You are ORCHESTRATOR level ${level} of ${depth} in a delegation chain — the FI
 7. Review every subagent report. If work is incomplete or wrong, delegate the fix to a subagent — never fix it yourself.
 8. Reuse a running subagent via its task_id when follow-up work belongs to the same context.
 9. Keep the user informed: report what was delegated to whom, the results, blockers, and the final state.
+
+${MANDATORY_FLOW_SECTION}
 
 ## Tool discipline
 - \`task\` for all work (mandatory), \`todowrite\` to track subtasks, \`question\` only to clarify genuinely ambiguous requests.
@@ -796,6 +849,98 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
             service: PLUGIN_ID,
             level: "error",
             message: `[${PLUGIN_ID}] Unexpected error in opencode-agent-tree config hook (this is a plugin bug; please report it)`,
+            extra: { error },
+          },
+        })
+      }
+    },
+
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "task") return
+
+      // Only enforce for orchestrator agents (any level created by this plugin)
+      const levelNames = new Set(orchestratorLevels(opts))
+      let agentName: string | undefined
+      try {
+        const sessionResult = await client.session.get({ path: { id: input.sessionID } })
+        const session = sessionResult.data
+        if (
+          session &&
+          typeof session === "object" &&
+          "agent" in session &&
+          typeof session.agent === "string"
+        ) {
+          agentName = session.agent
+        }
+      } catch {
+        // fall back to inferring from messages
+      }
+      if (!agentName) {
+        try {
+          const messagesResult = await client.session.messages({
+            path: { id: input.sessionID },
+            query: { limit: 5 },
+          })
+          const messages = messagesResult.data
+          if (messages) {
+            for (let i = messages.length - 1; i >= 0; i--) {
+              const { info } = messages[i]
+              if ("agent" in info && typeof info.agent === "string") {
+                agentName = info.agent
+                break
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!agentName || !levelNames.has(agentName)) return
+
+      const subtaskPrompt = typeof output.args?.prompt === "string" ? output.args.prompt : ""
+      const rootPrompt = await (async () => {
+        try {
+          const messagesResult = await client.session.messages({
+            path: { id: input.sessionID },
+            query: { limit: 50 },
+          })
+          return userTextFromMessages(messagesResult.data)
+        } catch {
+          return ""
+        }
+      })()
+
+      // 1. Reject monolithic copy (>75% word overlap with root user prompt)
+      if (promptOverlapRatio(subtaskPrompt, rootPrompt) > 0.75) {
+        const message = `[${PLUGIN_ID}] Delegation rejected: subtask prompt is a monolithic copy of the user's request. Decompose into atomic subtasks covering specific files or components.`
+        await client.app.log({ body: { service: PLUGIN_ID, level: "warn", message } })
+        throw new Error(message)
+      }
+
+      // 2. Reject long briefs without explicit file/module scope
+      if (subtaskPrompt.length > 200 && !hasExplicitScope(subtaskPrompt)) {
+        const message = `[${PLUGIN_ID}] Delegation rejected: subtask brief lacks explicit target file, directory, or module scope. Specify exact paths or boundaries for the worker subagent.`
+        await client.app.log({ body: { service: PLUGIN_ID, level: "warn", message } })
+        throw new Error(message)
+      }
+
+      // 3. Require at least 2 TODO items before first delegation
+      try {
+        const todoResult = await client.session.todo({ path: { id: input.sessionID } })
+        const todos = todoResult.data || []
+        if (todos.length < 2) {
+          const message = `[${PLUGIN_ID}] Delegation rejected: you must decompose the request into at least 2 TODO items using \`todowrite\` before dispatching subagents.`
+          await client.app.log({ body: { service: PLUGIN_ID, level: "warn", message } })
+          throw new Error(message)
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("Delegation rejected")) throw error
+        // If TODO API is unavailable, log and allow (fail-open to avoid breaking)
+        await client.app.log({
+          body: {
+            service: PLUGIN_ID,
+            level: "warn",
+            message: `[${PLUGIN_ID}] Could not verify TODO prerequisite for session ${input.sessionID}`,
             extra: { error },
           },
         })
