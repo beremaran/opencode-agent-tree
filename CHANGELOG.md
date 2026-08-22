@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 - 2026-08-22
+
+### Added
+
+- OpenCode 2 Promise plugin entrypoint with `id`/`setup` lifecycle and agent transforms.
+- OpenCode 2 permission and model translation, including `bash` → `shell` and `task` → `subagent`.
+- Dual package entrypoints: the package root targets OpenCode 2 while `main`/`./server` preserve OpenCode 1.
+- OpenCode 2 adapter tests and packed-package smoke coverage.
+
+### Changed
+
+- Package compatibility metadata now covers OpenCode `>=1.18.11 <3`.
+- Removed the runtime `@opencode-ai/sdk` dependency; SDK types were only used by the legacy hook implementation.
+
 ## 0.8.0 - 2026-08-06
 
 ### Added

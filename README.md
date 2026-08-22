@@ -7,6 +7,7 @@ An [opencode](https://opencode.ai) plugin that turns the model into an **orchest
 - Zero-config setup: one plugin entry, one required option.
 - Works with built-in subagents (`general`, `explore`) and any user-defined agents.
 - Enforcement is layered: prompt directive + hard tool block.
+- Supports both the OpenCode 1 server plugin API and the OpenCode 2 Promise plugin API.
 
 ## How it forces orchestration
 
@@ -65,7 +66,31 @@ Two placeholders are substituted at runtime:
 | `blockedTools` list | The `blockedTools` option joined with `, ` (default: `edit, bash`) |
 | `instructions` | The `instructions` option, appended verbatim at the end |
 
-## Installation
+## Compatibility and installation
+
+The package has two loader-compatible entrypoints:
+
+- OpenCode 1 resolves the callable server plugin through `main`/`./server` and uses the legacy `plugin` configuration field.
+- OpenCode 2 resolves the package root as a `{ id, setup }` plugin and uses the plural `plugins` field with an object entry.
+
+For OpenCode 2:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "Manager",
+  "plugins": [
+    {
+      "package": "@beremaran/opencode-agent-tree",
+      "options": { "subagentModel": "anthropic/claude-sonnet-4-6" }
+    }
+  ]
+}
+```
+
+For OpenCode 1:
+
+### OpenCode 1 installation
 
 As a local plugin (clone this repo, or point at your own copy):
 
@@ -81,7 +106,7 @@ As a local plugin (clone this repo, or point at your own copy):
 }
 ```
 
-From npm:
+From npm on OpenCode 1:
 
 ```json
 {
@@ -97,6 +122,10 @@ From npm:
 > Bun and strips types at load time. It is **not** importable from plain Node.js
 > — the `engines` field (`>=22.6`) exists for tooling compatibility only and is
 > not a promise that a plain Node process can load the plugin.
+
+For a local OpenCode 2 plugin file, point the `plugins` entry at `src/v2.ts`.
+For a local OpenCode 1 plugin file, point the legacy `plugin` entry at
+`src/index.ts` (or `src/v1.ts`).
 
 ## Getting started: pick your default agent
 
@@ -119,6 +148,10 @@ Alternatively, pick `Manager` in the agent picker at the start of each session.
 The startup log reports the effective default agent (`defaultAgent` in the
 summary entry's extra metadata) so you can confirm which mode a session runs in.
 
+In OpenCode 2 the same `default_agent` setting is translated by OpenCode's V2
+agent config layer; the plugin itself still creates `Manager` without changing
+your default unless you opt into it.
+
 ## Options
 
 | Option              | Type                 | Default                          | Description |
@@ -133,6 +166,11 @@ summary entry's extra metadata) so you can confirm which mode a session runs in.
 | `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
 | `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tools hard-denied to the orchestrator. `[]` = prompt-only enforcement. Names must match `[a-z0-9_-]+`. |
 | `restrictTask`      | `boolean`            | `false`                          | When `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents. Closes the "delegate to an unrestricted agent" loophole (see [Security](#security)). Without it, single-level orchestrators have no `task` rule, while final levels of chains (`orchestratorDepth > 1`) get a blanket `task: { "*": "allow" }` — required so opencode does not strip the `task` tool from the subagent session. |
+
+On OpenCode 2, the adapter writes the equivalent normalized fields: `prompt`
+becomes `system`, `permission` becomes ordered `permissions`, `bash` maps to
+the `shell` action, and `task` maps to the `subagent` action. The user-facing
+options stay the same across both APIs.
 
 ### Permission keys gate tool families
 
@@ -376,7 +414,7 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
   level re-plans the request, writes briefs, and reviews the level below it, so
   `orchestratorDepth: N` performs roughly N times the orchestrator-level model
   calls of depth 1.
-- **opencode itself limits agent nesting via `subagent_depth`.** opencode's
+- **OpenCode 1 limits agent nesting via `subagent_depth`.** opencode's
   `subagent_depth` option (default `1`) controls how deeply subagents can spawn
   further subagents: with the default, "primary agents can launch subagents but
   prevents those subagents from launching additional subagents" (per opencode's
@@ -384,7 +422,9 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
   hops, so it requires `"subagent_depth": N` (e.g. `3` for
   `orchestratorDepth: 3`) in `opencode.json`. Without it, the final hop fails
   with `Subagent depth limit reached` at runtime.
-- Supported opencode range: `>=1.18.11 <2` (per `peerDependencies`).
+- Supported OpenCode range: `>=1.18.11 <3` (per `engines.opencode`). OpenCode 1
+  uses the legacy callable entrypoint; OpenCode 2 uses the Promise transform
+  entrypoint. OpenCode 2 does not use the V1 `subagent_depth` warning.
 
 ## Troubleshooting
 
@@ -413,6 +453,9 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
   by setting `"subagent_depth": N` in `opencode.json` (or lowering
   `orchestratorDepth`). Without it, delegation beyond the first hop fails at
   runtime with `Subagent depth limit reached`.
+- **OpenCode 2 shows no V1 startup summary log.** The V2 transform API has no
+  equivalent `client.app.log` hook in the compatibility surface; inspect the
+  generated `Manager` agent and its `permissions` instead.
 - **"My explicitly-configured agent model is not used"** — for the orchestrator
   this is expected: `orchestratorModel` unconditionally overrides it, and
   `agentModels` entries keyed to it are ignored. For subagents, an explicit
@@ -449,7 +492,12 @@ npm install
 npm run check   # typecheck + lint + tests
 ```
 
-The plugin is a single `config` hook (`src/index.ts`): it mutates the merged opencode config at startup — routing subagent models, denying the orchestrator's hands-on tools, and installing the directive prompt. To verify against a live opencode, run from this repo (its `opencode.json` is pre-wired) and watch for the startup log line:
+The OpenCode 1 adapter is a `config` hook (`src/index.ts`); the OpenCode 2
+adapter is an `agent.transform` registration (`src/v2.ts`). Both route
+subagent models, deny the orchestrator's hands-on tools, and install the
+directive prompt. To verify the legacy adapter against a live opencode, run
+from this repo (its `opencode.json` is pre-wired) and watch for the startup log
+line:
 
 ```
 Orchestrator "Manager" enabled; subagents -> <subagentModel>
@@ -472,12 +520,11 @@ Pushing the tag runs `.github/workflows/publish.yml`, which:
    the released version.
 2. Installs dependencies and runs the full check suite (`npm run check`).
 3. Inspects the packed tarball and asserts it contains exactly the expected
-   files (`LICENSE`, `README.md`, `CHANGELOG.md`, `package.json`,
-   `src/index.ts`).
+   files, including the shared implementation and both entrypoints.
 4. Smoke-tests the tarball from a clean consumer install — a temp directory
    with `npm init -y` + `npm install <tarball>` — importing **by package name**
-   under **Bun** (the same runtime opencode uses to load plugins) and asserting
-   the default and named exports are functions.
+   under **Bun** and asserting the root OpenCode 2 export is an `id`/`setup`
+   object while `./server` remains a callable OpenCode 1 export.
 5. Publishes to npm using the `NPM_TOKEN` secret with **npm provenance**
    (`publishConfig.provenance` + `id-token: write`).
 6. Creates a GitHub Release (via `softprops/action-gh-release`) whose body is
@@ -488,9 +535,10 @@ supported flow: it will not produce provenance and bypasses the release
 checks. If you do run it, `prepublishOnly` runs `npm run check` first, but
 prefer the tag flow.
 
-The `types` entry (`./src/index.ts`) is intentionally the raw TypeScript
-source: opencode loads plugins with Bun, so the published package ships `.ts`
-directly with no build step. The same applies to `main`. The `./package.json`
+The `types` and entrypoint fields intentionally point at raw TypeScript source:
+opencode loads plugins with Bun, so the published package ships `.ts` directly
+with no build step. The package root is the OpenCode 2 entrypoint; `main` and
+`./server` preserve the OpenCode 1 callable entrypoint. The `./package.json`
 export is included so consumers can read package metadata without a resolver
 round-trip.
 

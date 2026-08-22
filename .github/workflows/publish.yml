@@ -104,13 +104,21 @@ jobs:
       - name: Inspect package contents
         run: |
           # Assert the packed tarball contains exactly the expected files:
-          # CHANGELOG.md, LICENSE, README.md, package.json, src/index.ts.
+          # CHANGELOG.md, LICENSE, README.md, package.json, and all entrypoints.
           npm pack --dry-run --json > pack-info.json
           node --input-type=module -e '
             import { readFileSync } from "node:fs"
             const [entry] = JSON.parse(readFileSync("pack-info.json", "utf8"))
             const actual = entry.files.map((f) => f.path).sort()
-            const expected = ["CHANGELOG.md", "LICENSE", "README.md", "package.json", "src/index.ts"].sort()
+            const expected = [
+              "CHANGELOG.md",
+              "LICENSE",
+              "README.md",
+              "package.json",
+              "src/index.ts",
+              "src/v1.ts",
+              "src/v2.ts",
+            ].sort()
             if (JSON.stringify(actual) !== JSON.stringify(expected)) {
               console.error("packed file mismatch")
               console.error("expected: " + expected.join(", "))
@@ -130,14 +138,15 @@ jobs:
           # restriction for .ts files under node_modules
           # (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING): Bun natively runs
           # the raw .ts main. The import resolves by package name and asserts
-          # both the default and named exports are functions.
+          # the root OpenCode 2 export is an object and ./server is the
+          # callable OpenCode 1 export.
           REPO_ROOT="$PWD"
           TARBALL="$(npm pack --silent)"
           CONSUMER_DIR="$(mktemp -d)"
           cd "$CONSUMER_DIR"
           npm init -y
           npm install "$REPO_ROOT/$TARBALL"
-          bun -e "await import('@beremaran/opencode-agent-tree').then(m => { if (typeof m.default !== 'function' || typeof m.OrchestratorPlugin !== 'function') process.exit(1) })"
+          bun -e "const root = await import('@beremaran/opencode-agent-tree'); if (root.default?.id !== '@beremaran/opencode-agent-tree' || typeof root.default?.setup !== 'function') process.exit(1); const v1 = await import('@beremaran/opencode-agent-tree/server'); if (typeof v1.default !== 'function') process.exit(1)"
 
       - name: Extract CHANGELOG section for release body
         run: |

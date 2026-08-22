@@ -1,6 +1,6 @@
 {
   "name": "@beremaran/opencode-agent-tree",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -8,12 +8,16 @@
   "description": "Force opencode to act as an orchestrator: every task is decomposed and delegated to subagents, with user-configurable models per agent.",
   "type": "module",
   "sideEffects": false,
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./src/v1.ts",
+  "types": "./src/v2.ts",
   "exports": {
     ".": {
+      "types": "./src/v2.ts",
+      "default": "./src/v2.ts"
+    },
+    "./server": {
       "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "default": "./src/v1.ts"
     },
     "./package.json": "./package.json"
   },
@@ -26,7 +30,8 @@
     "url": "https://github.com/beremaran/opencode-agent-tree/issues"
   },
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.6",
+    "opencode": ">=1.18.11 <3"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -56,14 +61,15 @@
     "github": "beremaran"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.11 <2"
+    "@opencode-ai/plugin": "^1.18.11 || ^0.0.0-beta"
   },
-  "dependencies": {
-    "@opencode-ai/sdk": ">=1.18.11 <2"
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",
-    "@opencode-ai/plugin": "1.18.11",
     "@types/node": "^26.1.2",
     "typescript": "^5.6.0"
   }

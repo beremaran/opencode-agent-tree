@@ -1,7 +1,48 @@
-import type { Config, Plugin } from "@opencode-ai/plugin"
-import type { Message, Part, TextPart } from "@opencode-ai/sdk"
-
 const PLUGIN_ID = "@beremaran/opencode-agent-tree"
+
+/**
+ * Structural V1 types keep the raw TypeScript entrypoint loadable and
+ * type-checkable when a consumer has installed either the OpenCode 1 or the
+ * OpenCode 2 plugin package. The implementation only uses this small subset
+ * of the legacy host surface.
+ */
+type LegacyConfig = {
+  model?: unknown
+  default_agent?: unknown
+  subagent_depth?: unknown
+  agent?: Record<string, unknown>
+}
+
+type LegacyClient = {
+  app: {
+    log: (entry: unknown) => Promise<void>
+  }
+  session: {
+    get: (options: { path: { id: string } }) => Promise<{ data?: Record<string, unknown> }>
+    messages: (options: {
+      path: { id: string }
+      query: { limit: number }
+    }) => Promise<{ data?: Array<{ info: LegacyMessage; parts: LegacyPart[] }> }>
+    todo: (options: { path: { id: string } }) => Promise<{ data?: unknown[] }>
+  }
+}
+
+type LegacyToolInput = {
+  tool: string
+  sessionID: string
+  callID?: string
+}
+
+type LegacyToolOutput = {
+  args?: Record<string, unknown>
+}
+
+type LegacyHooks = {
+  config?: (cfg: LegacyConfig) => Promise<void>
+  "tool.execute.before"?: (input: LegacyToolInput, output: LegacyToolOutput) => Promise<void>
+}
+
+type LegacyPlugin = (input: { client: LegacyClient }, options?: unknown) => Promise<LegacyHooks>
 
 /**
  * Options accepted by the plugin's factory. The SDK `Plugin` type is not
@@ -119,12 +160,11 @@ const DEFAULTS = {
  * `config` hook runs, so the target entries must be created explicitly.
  * Entries created here are merged over the built-ins at agent lookup time.
  *
- * This list mirrors opencode's built-in subagents for the supported peer
- * range (>=1.18.11 <2) and must be updated if opencode adds or renames
- * built-in subagents. Note: `scout` appears in newer opencode docs but is
- * not native as of 1.18.x, so it is deliberately excluded until the
- * supported peer range includes it (routing a non-native name creates a
- * phantom agent with no prompt/description).
+ * This list mirrors opencode's built-in subagents across the supported V1/V2
+ * host ranges and must be updated if opencode adds or renames built-in
+ * subagents. Note: `scout` appears in some newer opencode docs but is not a
+ * native general-purpose subagent in the supported hosts, so it remains
+ * excluded until the host exposes it as a real agent.
  */
 const BUILTIN_SUBAGENTS = ["general", "explore"]
 
@@ -133,8 +173,8 @@ const BUILTIN_SUBAGENTS = ["general", "explore"]
  * even when absent from the merged config, so candidates with these names
  * are excluded from routing (and from the phantom-name warning).
  *
- * This list mirrors opencode's built-in agents for the supported peer range
- * (>=1.18.11 <2) and must be updated if opencode adds or renames built-ins.
+ * This list mirrors opencode's built-in agents across the supported V1/V2
+ * host ranges and must be updated if opencode adds or renames built-ins.
  */
 const KNOWN_BUILTINS = ["build", "plan", "compaction", "title", "summary"]
 
@@ -253,22 +293,22 @@ const validateBlockedTools = (names: string[]): string[] => {
  * value only when it is a non-empty string, otherwise "(unset)". Never
  * throws if the field is missing or has an unexpected shape.
  */
-const defaultAgentOf = (cfg: Config): string => {
-  const value = (cfg as Config & { default_agent?: unknown }).default_agent
+const defaultAgentOf = (cfg: LegacyConfig): string => {
+  const value = cfg.default_agent
   return typeof value === "string" && value.trim() !== "" ? value : "(unset)"
 }
 
 /**
  * Reads opencode's `subagent_depth` config defensively for the chain-depth
  * warning. The `Config` type from @opencode-ai/plugin may not expose the field
- * (the SDK's `types.gen.d.ts` declares `subagent_depth?: number`), so it is
+ * (the SDK declares `subagent_depth?: number`), so it is
  * read via an intersection cast. Mirrors opencode's `?? 1` default: only an
  * integer number >= 0 counts as an explicit limit; anything else (missing,
  * string, fractional, negative) falls back to 1. An explicit `0` is a real
  * limit of 0.
  */
-const subagentDepthOf = (cfg: Config): number => {
-  const value = (cfg as Config & { subagent_depth?: unknown }).subagent_depth
+const subagentDepthOf = (cfg: LegacyConfig): number => {
+  const value = cfg.subagent_depth
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 1
 }
 
@@ -389,13 +429,20 @@ const hasExplicitScope = (text: string): boolean =>
   )
 
 // Extract user text from the most recent user message parts
-const userTextFromMessages = (messages: Array<{ info: Message; parts: Part[] }> | undefined): string => {
+type LegacyMessage = { role: string }
+type LegacyPart = { type: string; text?: string }
+
+const userTextFromMessages = (
+  messages: Array<{ info: LegacyMessage; parts: LegacyPart[] }> | undefined,
+): string => {
   if (!messages) return ""
   for (let i = messages.length - 1; i >= 0; i--) {
     const { info, parts } = messages[i]
     if (info.role !== "user") continue
     const texts = parts
-      .filter((part: Part): part is TextPart => part.type === "text")
+      .filter(
+        (part): part is LegacyPart & { type: "text"; text: string } => part.type === "text" && !!part.text,
+      )
       .map((part) => part.text)
     return texts.join(" ").trim()
   }
@@ -622,7 +669,7 @@ const applyTaskRule = async (
   entry.permission = permission
 }
 
-export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
+export const OrchestratorPlugin: LegacyPlugin = async ({ client }, options = {}) => {
   let opts: NormalizedOptions
   try {
     opts = normalizeOptions(options)
@@ -948,5 +995,213 @@ export const OrchestratorPlugin: Plugin = async ({ client }, options = {}) => {
     },
   }
 }
+
+/**
+ * The V2 plugin API uses normalized agent records instead of the mutable V1
+ * config object. These structural types keep the package compatible with both
+ * the V1 plugin package and the V2 Promise API without importing either V2
+ * runtime package at load time.
+ */
+type V2PermissionEffect = "allow" | "deny" | "ask"
+
+type V2PermissionRule = {
+  action: string
+  resource: string
+  effect: V2PermissionEffect
+}
+
+type V2Agent = {
+  id: string
+  model?: {
+    id: string
+    providerID: string
+    variant?: string
+  }
+  system?: string
+  description?: string
+  mode: string
+  permissions: V2PermissionRule[]
+}
+
+type V2AgentDraft = {
+  list: () => readonly V2Agent[]
+  get: (id: string) => V2Agent | undefined
+  update: (id: string, update: (agent: V2Agent) => void) => void
+}
+
+type V2ToolEvent = {
+  tool: string
+  agent: string
+  input: unknown
+}
+
+export type V2Context = {
+  options?: unknown
+  agent: {
+    transform: (callback: (draft: V2AgentDraft) => void) => Promise<unknown> | unknown
+  }
+  tool?: {
+    hook?: (name: string, callback: (event: V2ToolEvent) => Promise<void> | void) => Promise<unknown>
+  }
+}
+
+export type V2Plugin = {
+  readonly id: string
+  readonly setup: (context: V2Context) => Promise<void>
+}
+
+type V2CapablePlugin = typeof OrchestratorPlugin & {
+  readonly v2?: V2Plugin
+}
+
+const V2_ACTIONS: Record<string, string> = {
+  bash: "shell",
+  task: "subagent",
+}
+
+const v2Action = (name: string): string => V2_ACTIONS[name] ?? name
+
+const v2Model = (model: string, existing: V2Agent["model"]): NonNullable<V2Agent["model"]> => {
+  const separator = model.indexOf("/")
+  return {
+    providerID: model.slice(0, separator),
+    id: model.slice(separator + 1),
+    ...(existing?.variant ? { variant: existing.variant } : {}),
+  }
+}
+
+const v2EnsureAgent = (draft: V2AgentDraft, name: string): V2Agent => {
+  let entry: V2Agent | undefined
+  draft.update(name, (agent) => {
+    entry = agent
+  })
+  const resolved = entry ?? draft.get(name)
+  if (!resolved) throw new Error(`[${PLUGIN_ID}] OpenCode 2 could not create agent "${name}".`)
+  resolved.permissions ??= []
+  return resolved
+}
+
+const v2AddPermission = (entry: V2Agent, rule: V2PermissionRule): void => {
+  entry.permissions ??= []
+  if (
+    entry.permissions.some(
+      (existing) =>
+        existing.action === rule.action &&
+        existing.resource === rule.resource &&
+        existing.effect === rule.effect,
+    )
+  ) {
+    return
+  }
+  entry.permissions.push(rule)
+}
+
+const v2DenyTools = (entry: V2Agent, blockedTools: string[]): void => {
+  for (const tool of blockedTools) {
+    v2AddPermission(entry, { action: v2Action(tool), resource: "*", effect: "deny" })
+  }
+}
+
+const v2TaskRule = (entry: V2Agent, targets: string[], restrict: boolean): void => {
+  v2AddPermission(entry, { action: "subagent", resource: "*", effect: "deny" })
+  if (!restrict) {
+    v2AddPermission(entry, { action: "subagent", resource: "*", effect: "allow" })
+    return
+  }
+  for (const target of targets) {
+    v2AddPermission(entry, { action: "subagent", resource: target, effect: "allow" })
+  }
+}
+
+const v2InScope = (name: string, entry: V2Agent | undefined, levelNames: Set<string>): boolean =>
+  !KNOWN_BUILTINS.includes(name) && entry?.mode !== "primary" && !levelNames.has(name)
+
+const v2ApplyConfig = (draft: V2AgentDraft, opts: NormalizedOptions): void => {
+  const levels = orchestratorLevels(opts)
+  const levelNames = new Set(levels)
+  const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, ...draft.list().map((entry) => entry.id)]
+  const targets = [...new Set(candidates)].filter((name) => v2InScope(name, draft.get(name), levelNames))
+
+  for (const name of targets) {
+    const entry = v2EnsureAgent(draft, name)
+    if (!entry.model)
+      entry.model = v2Model(
+        Object.hasOwn(opts.agentModels, name) ? opts.agentModels[name] : opts.subagentModel,
+        entry.model,
+      )
+  }
+
+  for (let index = 0; index < levels.length; index += 1) {
+    const name = levels[index]
+    const level = index + 1
+    const depth = opts.orchestratorDepth
+    const isFinal = level === depth
+    const entry = v2EnsureAgent(draft, name)
+    const levelModel = opts.orchestratorModels?.[level - 1] ?? opts.orchestratorModel
+
+    if (!entry.description) {
+      entry.description =
+        level === 1
+          ? "Orchestrator agent: decomposes every request and delegates to subagents."
+          : isFinal
+            ? `Orchestrator agent (level ${level}/${depth}): decomposes requests from the level above and delegates to the routed subagents.`
+            : `Orchestrator agent (level ${level}/${depth}): decomposes requests from the level above and delegates to the next level.`
+    }
+    entry.mode = level === 1 ? "primary" : "subagent"
+    if (levelModel) entry.model = v2Model(levelModel, entry.model)
+    v2DenyTools(entry, opts.blockedTools)
+
+    if (isFinal) {
+      if (depth > 1 || (opts.restrictTask && targets.length > 0)) {
+        v2TaskRule(entry, targets, opts.restrictTask && targets.length > 0)
+      }
+    } else {
+      v2TaskRule(entry, [levels[index + 1]], true)
+    }
+    if (level > 1) v2AddPermission(entry, { action: "todowrite", resource: "*", effect: "allow" })
+
+    const marker = levelDirectiveMarker(level, depth)
+    if (!entry.system?.includes(marker)) {
+      const directive = orchestratorDirective(opts, level, depth, isFinal ? undefined : levels[index + 1])
+      entry.system = entry.system ? `${entry.system}\n\n${directive}` : directive
+    }
+  }
+}
+
+const v2RuntimeGuard = async (context: V2Context, opts: NormalizedOptions): Promise<void> => {
+  const hook = context.tool?.hook
+  if (!hook) return
+
+  await hook("execute.before", async (event) => {
+    if (event.tool !== "task" && event.tool !== "subagent") return
+    if (!orchestratorLevels(opts).includes(event.agent)) return
+
+    const input = isRecord(event.input) ? event.input : {}
+    const prompt = typeof input.prompt === "string" ? input.prompt : ""
+    if (prompt.length <= 200 || hasExplicitScope(prompt)) return
+
+    const message = `[${PLUGIN_ID}] Delegation rejected: subtask brief lacks explicit target file, directory, or module scope. Specify exact paths or boundaries for the worker subagent.`
+    throw new Error(message)
+  })
+}
+
+const V2_PLUGIN: V2Plugin = {
+  id: PLUGIN_ID,
+  setup: async (context) => {
+    const opts = normalizeOptions(context.options ?? {})
+    await context.agent.transform((draft) => v2ApplyConfig(draft, opts))
+    await v2RuntimeGuard(context, opts)
+  },
+}
+
+// Keep the legacy module's enumerable exports function-only. OpenCode 1's
+// legacy loader invokes every enumerable export as a plugin, while OpenCode 2
+// receives the object through the dedicated root entrypoint in src/v2.ts.
+Object.defineProperty(OrchestratorPlugin as V2CapablePlugin, "v2", {
+  configurable: false,
+  enumerable: false,
+  value: V2_PLUGIN,
+  writable: false,
+})
 
 export default OrchestratorPlugin

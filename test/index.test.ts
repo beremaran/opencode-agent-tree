@@ -2,11 +2,19 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
-import type { Config, PluginInput } from "@opencode-ai/plugin"
 
 const { OrchestratorPlugin } = await import("../src/index.ts")
 
 const SERVICE = "@beremaran/opencode-agent-tree"
+
+type Config = {
+  model?: unknown
+  default_agent?: unknown
+  subagent_depth?: unknown
+  agent?: Record<string, unknown>
+}
+
+type PluginInput = Parameters<typeof OrchestratorPlugin>[0]
 
 type LogBody = {
   service: string
@@ -1701,4 +1709,147 @@ test("the hook does not intercept non-task tools", async () => {
     )
   }
   assert.equal(warnMatching(logs, /Delegation rejected/).length, 0)
+})
+
+type V2TestPermission = {
+  action: string
+  resource: string
+  effect: "allow" | "deny" | "ask"
+}
+
+type V2TestAgent = {
+  id: string
+  model?: { providerID: string; id: string; variant?: string }
+  system?: string
+  description?: string
+  mode: "primary" | "subagent" | "all"
+  permissions: V2TestPermission[]
+}
+
+type V2TestDraft = {
+  list: () => V2TestAgent[]
+  get: (id: string) => V2TestAgent | undefined
+  update: (id: string, update: (agent: V2TestAgent) => void) => void
+}
+
+const createV2TestAgent = (id: string, mode: V2TestAgent["mode"] = "subagent"): V2TestAgent => ({
+  id,
+  mode,
+  permissions: [],
+})
+
+const applyV2 = async (options: Record<string, unknown>, initial: V2TestAgent[] = []) => {
+  const { default: loadedPlugin } = await import("../src/v2.ts")
+  const agents = new Map(initial.map((agent) => [agent.id, agent]))
+  let runtimeHook:
+    | ((event: { tool: string; agent: string; input: unknown }) => Promise<void> | void)
+    | undefined
+  const draft: V2TestDraft = {
+    list: () => [...agents.values()],
+    get: (id: string) => agents.get(id),
+    update: (id: string, update: (agent: V2TestAgent) => void) => {
+      const agent = agents.get(id) ?? createV2TestAgent(id)
+      agents.set(id, agent)
+      update(agent)
+    },
+  }
+  const plugin = loadedPlugin as {
+    setup: (context: {
+      options: Record<string, unknown>
+      agent: { transform: (callback: (draft: V2TestDraft) => void) => Promise<unknown> }
+      tool: {
+        hook: (
+          name: string,
+          callback: (event: { tool: string; agent: string; input: unknown }) => Promise<void> | void,
+        ) => Promise<unknown>
+      }
+    }) => Promise<void>
+  }
+
+  await plugin.setup({
+    options,
+    agent: { transform: async (callback) => callback(draft) },
+    tool: {
+      hook: async (_name, callback) => {
+        runtimeHook = callback
+      },
+    },
+  })
+
+  return { agents, runtimeHook }
+}
+
+test("OpenCode 2 entrypoint exposes an id/setup plugin and translates agent config", async () => {
+  const { default: plugin } = await import("../src/v2.ts")
+  assert.equal(plugin.id, SERVICE)
+  assert.equal(typeof plugin.setup, "function")
+
+  const { agents } = await applyV2(
+    {
+      subagentModel: "worker/fast",
+      orchestratorModel: "manager/strong",
+      agents: ["general", "explore"],
+      restrictTask: true,
+    },
+    [createV2TestAgent("general"), createV2TestAgent("explore")],
+  )
+  const manager = agents.get("Manager")
+  const general = agents.get("general")
+  assert.ok(manager)
+  assert.ok(general)
+  assert.equal(manager.mode, "primary")
+  assert.deepEqual(manager.model, { providerID: "manager", id: "strong" })
+  assert.match(manager.system ?? "", /# Orchestrator Mode \(enforced by @beremaran\/opencode-agent-tree\)/)
+  assert.deepEqual(general.model, { providerID: "worker", id: "fast" })
+  assert.ok(manager.permissions.some((rule) => rule.action === "edit" && rule.effect === "deny"))
+  assert.ok(manager.permissions.some((rule) => rule.action === "shell" && rule.effect === "deny"))
+  assert.ok(
+    manager.permissions.some(
+      (rule) => rule.action === "subagent" && rule.resource === "general" && rule.effect === "allow",
+    ),
+  )
+  assert.equal(
+    manager.permissions.some((rule) => rule.action === "bash" || rule.action === "task"),
+    false,
+  )
+})
+
+test("OpenCode 2 deep orchestration creates subagent levels with V2 permissions", async () => {
+  const { agents } = await applyV2(
+    {
+      subagentModel: "worker/fast",
+      orchestratorDepth: 2,
+    },
+    [createV2TestAgent("general"), createV2TestAgent("explore")],
+  )
+  const manager2 = agents.get("Manager-2")
+  assert.ok(manager2)
+  assert.equal(manager2.mode, "subagent")
+  assert.match(manager2.system ?? "", /level 2\/2/)
+  assert.ok(
+    manager2.permissions.some(
+      (rule) => rule.action === "subagent" && rule.resource === "*" && rule.effect === "allow",
+    ),
+  )
+  assert.ok(
+    manager2.permissions.some(
+      (rule) => rule.action === "todowrite" && rule.resource === "*" && rule.effect === "allow",
+    ),
+  )
+})
+
+test("OpenCode 2 runtime hook rejects an unscoped long subagent brief", async () => {
+  const { runtimeHook } = await applyV2({ subagentModel: "worker/fast" })
+  assert.ok(runtimeHook)
+  await assert.rejects(
+    async () => runtimeHook?.({ tool: "subagent", agent: "Manager", input: { prompt: "x".repeat(201) } }),
+    /lacks explicit target file/,
+  )
+  await assert.doesNotReject(async () => {
+    await runtimeHook?.({
+      tool: "subagent",
+      agent: "Manager",
+      input: { prompt: `${"x".repeat(201)} in src/index.ts` },
+    })
+  })
 })
