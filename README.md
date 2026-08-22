@@ -1,7 +1,5 @@
 # @beremaran/opencode-agent-tree
 
-> **⚠️ Archived** — This repository is archived. Its functionality (agent orchestration) has been consolidated into the [opencode-beanie-plugin](https://github.com/beremaran/opencode-beanie-plugin) (feature: `orchestrator`). Please use that instead.
-
 An [opencode](https://opencode.ai) plugin that turns the model into an **orchestrator**: every request is decomposed into **small subtasks** and **delegated to subagents via the `task` tool**, never done by the orchestrator itself. You decide which model powers the subagents and which powers the orchestrator.
 
 > **Renamed:** this package was previously published as `opencode-agent-tree`. It is now `@beremaran/opencode-agent-tree`; the old name is deprecated on npm.
