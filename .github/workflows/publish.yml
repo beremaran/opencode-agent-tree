@@ -184,7 +184,9 @@ jobs:
           '
 
       - name: Publish package
-        run: bun publish
+        # npm, not bun: bun publish ignores setup-node's ${NODE_AUTH_TOKEN}
+        # .npmrc placeholder and has no provenance support.
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
