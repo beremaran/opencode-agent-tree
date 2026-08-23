@@ -45,7 +45,7 @@ const SUBAGENT_MODEL = "anthropic/claude-haiku-4-5";
 const ORCHESTRATOR_MODEL = "anthropic/claude-sonnet-4-5";
 const ORCHESTRATOR_AGENT = "Manager";
 const DIRECTIVE_MARKER = "# Orchestrator Mode";
-// Must mirror src/index.ts BUILTIN_SUBAGENTS. "scout" is intentionally absent:
+// Must mirror src/core/constants.ts BUILTIN_SUBAGENTS. "scout" is intentionally absent:
 // opencode 1.18.12 has no native scout agent, so the plugin must not fabricate
 // one. The phantom-scout guard below catches a non-native name re-added here.
 const BUILTIN_SUBAGENTS = ["general", "explore"];
@@ -283,7 +283,7 @@ const main = async () => {
         // opencode 1.18.12 has NO native "scout" agent (verified: `opencode debug
         // agent scout` -> "Agent scout not found"). The plugin must not fabricate a
         // scout entry. This inverts the old model-injection check: if someone
-        // re-adds a non-native name to BUILTIN_SUBAGENTS in src/index.ts, a phantom
+        // re-adds a non-native name to BUILTIN_SUBAGENTS in src/core/constants.ts, a phantom
         // scout appears in /config or /agent and this test fails.
         const phantomScoutInConfig = configAgentMap.scout !== undefined;
         const phantomScoutInAgents = agentMap.has("scout");

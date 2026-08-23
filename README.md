@@ -20,7 +20,7 @@ If a model ever ignores the directive, layer 2 still makes it delegate: the tool
 
 ## The orchestrator directive
 
-This is the directive template rendered into the orchestrator's system prompt (as configured in `src/index.ts`, `orchestratorDirective`). The block below is the rendered form with default settings (no `instructions`); the two runtime substitutions are listed after it.
+This is the directive template rendered into the orchestrator's system prompt (as configured in `src/core/directives.ts`, `orchestratorDirective`). The block below is the rendered form with default settings (no `instructions`); the two runtime substitutions are listed after it.
 
 ```markdown
 # Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)
