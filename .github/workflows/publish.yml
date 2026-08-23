@@ -122,9 +122,18 @@ jobs:
               "LICENSE",
               "README.md",
               "package.json",
+              "src/core/constants.ts",
+              "src/core/directives.ts",
+              "src/core/options.ts",
+              "src/core/types.ts",
               "src/index.ts",
               "src/v1.ts",
+              "src/v1/index.ts",
+              "src/v1/permissions.ts",
+              "src/v1/types.ts",
               "src/v2.ts",
+              "src/v2/index.ts",
+              "src/v2/types.ts",
             ].sort()
             if (JSON.stringify(actual) !== JSON.stringify(expected)) {
               console.error("packed file mismatch")
