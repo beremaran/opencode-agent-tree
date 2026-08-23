@@ -27,7 +27,7 @@
  * dir so plugins installed in the user's global config do not pollute the
  * merged config (observed on this machine).
  *
- * Usage: `npm run test:smoke` (or `node test/smoke.mjs`).
+ * Usage: `bun run test:smoke` (or `node test/smoke.mjs`).
  * Requires the `opencode` CLI on PATH (override with OPENCODE_BIN).
  * Exits non-zero on any failed hard assertion.
  */

@@ -488,8 +488,8 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 ## Development
 
 ```bash
-npm install
-npm run check   # typecheck + lint + tests
+bun install
+bun run check   # typecheck + lint + format + tests
 ```
 
 The OpenCode 1 adapter is a `config` hook (`src/index.ts`); the OpenCode 2
@@ -507,7 +507,7 @@ See [RELEASING.md](RELEASING.md) for the release process.
 
 ## Publishing
 
-Releases are **tag-triggered from CI**, not local `npm publish`:
+Releases are **tag-triggered from CI**, not local `bun publish`:
 
 ```bash
 git tag vX.Y.Z
@@ -518,11 +518,11 @@ Pushing the tag runs `.github/workflows/publish.yml`, which:
 
 1. Verifies the tag matches `package.json` and that `CHANGELOG.md` documents
    the released version.
-2. Installs dependencies and runs the full check suite (`npm run check`).
+2. Installs dependencies and runs the full check suite (`bun run check`).
 3. Inspects the packed tarball and asserts it contains exactly the expected
    files, including the shared implementation and both entrypoints.
 4. Smoke-tests the tarball from a clean consumer install — a temp directory
-   with `npm init -y` + `npm install <tarball>` — importing **by package name**
+   with `bun init -y` + `bun add <tarball>` — importing **by package name**
    under **Bun** and asserting the root OpenCode 2 export is an `id`/`setup`
    object while `./server` remains a callable OpenCode 1 export.
 5. Publishes to npm using the `NPM_TOKEN` secret with **npm provenance**
@@ -530,9 +530,9 @@ Pushing the tag runs `.github/workflows/publish.yml`, which:
 6. Creates a GitHub Release (via `softprops/action-gh-release`) whose body is
    the CHANGELOG section for the released version.
 
-**npm provenance requires the CI path.** A local `npm publish` is not the
+**npm provenance requires the CI path.** A local `bun publish` is not the
 supported flow: it will not produce provenance and bypasses the release
-checks. If you do run it, `prepublishOnly` runs `npm run check` first, but
+checks. If you do run it, `prepublishOnly` runs `bun run check` first, but
 prefer the tag flow.
 
 The `types` and entrypoint fields intentionally point at raw TypeScript source:

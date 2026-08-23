@@ -300,7 +300,7 @@ test("non-record orchestrator permission is treated as an empty object with a wa
 test("command-scoped permission rules are replaced by a blanket deny with a warning", async () => {
   const { config, logs } = await apply(
     { subagentModel: "provider/model" },
-    { agent: { Manager: { mode: "primary", permission: { bash: { "npm install": "allow" } } } } },
+    { agent: { Manager: { mode: "primary", permission: { bash: { "bun install": "allow" } } } } },
   )
 
   assert.deepEqual(config.agent.Manager.permission, { edit: "deny", bash: "deny" })
@@ -508,8 +508,7 @@ test("agent names colliding with Object.prototype keys are handled safely", asyn
   )
 
   // Use a variable key: dot access ("config.agent.toString") would resolve to
-  // Object.prototype.toString instead of the agent entry, and a literal bracket
-  // access trips biome's useLiteralKeys rule.
+  // Object.prototype.toString instead of the agent entry.
   const collisionKey = "toString"
   assert.equal(Object.hasOwn(config.agent, collisionKey), true)
   assert.equal(config.agent[collisionKey].model, "provider/model")
@@ -1742,8 +1741,7 @@ const applyV2 = async (options: Record<string, unknown>, initial: V2TestAgent[] 
   const { default: loadedPlugin } = await import("../src/v2.ts")
   const agents = new Map(initial.map((agent) => [agent.id, agent]))
   let runtimeHook:
-    | ((event: { tool: string; agent: string; input: unknown }) => Promise<void> | void)
-    | undefined
+    ((event: { tool: string; agent: string; input: unknown }) => Promise<void> | void) | undefined
   const draft: V2TestDraft = {
     list: () => [...agents.values()],
     get: (id: string) => agents.get(id),

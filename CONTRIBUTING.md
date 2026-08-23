@@ -5,8 +5,8 @@ Thanks for contributing to @beremaran/opencode-agent-tree!
 ## Getting started
 
 1. Fork the repository and clone your fork.
-2. `npm install`
-3. `npm run check`
+2. `bun install`
+3. `bun run check`
 
 The plugin has no runtime dependencies — it runs as a single `config` hook
 loaded by opencode (Bun runtime). There is no build step.
@@ -38,21 +38,21 @@ Orchestrator "Manager" enabled; subagents -> <subagentModel>
 ## Writing tests
 
 - Tests live in a single file: `test/index.test.ts`. It uses `node:test`
-  (run via `npm test`, which invokes
+  (run via `bun run test`, which invokes
   `node --experimental-strip-types --test test/index.test.ts`; use
-  `npm run test:coverage` for coverage).
+  `bun run test:coverage` for coverage).
 - Keep log assertions **filter-based, not positional**. The test helpers
   collect the plugin's `client.app.log` calls; match the log you care about by
   filtering on message content (e.g. `warnMatching(logs, /blocked tool/)`),
   never by assuming an index like `logs[0]` — a new warning added earlier in
   the config hook would silently break it.
-- Add a test for any behavior you change, and run `npm run check`
-  (typecheck + lint + tests) before pushing; CI enforces it.
+- Add a test for any behavior you change, and run `bun run check`
+  (typecheck + lint + format + tests) before pushing; CI enforces it.
 
 ## Pull requests
 
 - Keep changes minimal and scoped.
-- Run `npm run check` before pushing; CI enforces it.
+- Run `bun run check` before pushing; CI enforces it.
 - If you change the directive prompt (`orchestratorDirective` in `src/index.ts`),
   update the copy in `README.md` to match. The rendered directive block in the
   README is asserted byte-for-byte against the code's rendered directive, so a

@@ -4,7 +4,7 @@
 
 ## Checklist
 
-- [ ] `npm run check` passes (typecheck + lint + tests)
+- [ ] `bun run check` passes (typecheck + lint + format + tests)
 - [ ] `CHANGELOG.md` updated under `## [Unreleased]` (if behavior changed)
 - [ ] `README.md` updated (if behavior or options changed; keep the rendered
       directive block byte-for-byte in sync with `orchestratorDirective` in

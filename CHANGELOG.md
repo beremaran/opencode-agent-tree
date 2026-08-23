@@ -70,9 +70,9 @@
 - The plugin now warns at startup when `orchestratorDepth` exceeds opencode's `subagent_depth` (default `1`), naming both values and the fix: a chain of depth `N` needs `"subagent_depth": N` in `opencode.json` or delegation beyond the first hop fails with "Subagent depth limit reached".
 - New `orchestratorDepth` option (default `1`): with `N` the plugin creates a chain of N orchestrator-only agents (`<orchestratorAgent>`, `<orchestratorAgent>-2`, ..., `<orchestratorAgent>-N`). Intermediate levels are structurally restricted to delegate only to the next level (`permission.task` is pinned to `{ "*": "deny", "<next-level>": "allow" }` regardless of `restrictTask`); the final level delegates to the routed subagents (`general`/`explore`, ...), which keep their hands-on tools. Every level defaults to `orchestratorModel`, gets the denied hands-on tools, and receives a level-aware directive prompt (level 1 keeps the existing `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)` header exactly). Backward compatible: `orchestratorDepth: 1` reproduces the previous single-orchestrator behavior byte-for-byte. Requires opencode `subagent_depth >= N` for chains of depth `N` (see README Limitations).
 - Exported `OrchestratorOptions` type in `src/index.ts` for typed plugin options.
-- Biome linting (`npm run lint` runs `biome check src test`); `npm run check` now runs typecheck, lint, and tests; CI runs lint and runs the test suite under Bun.
+- ESLint and Prettier checks (`bun run lint` runs ESLint and `bun run format:check` runs Prettier); `bun run check` now runs typecheck, lint, formatting, and tests; CI runs lint and runs the test suite under Bun.
 - `prepublishOnly` runs the full check suite before publishing.
-- `sideEffects: false`, `homepage`, `bugs`, and a `./package.json` export in `package.json`, plus `@types/node` and `@biomejs/biome` dev dependencies.
+- `sideEffects: false`, `homepage`, `bugs`, and a `./package.json` export in `package.json`, plus ESLint, Prettier, `typescript-eslint`, and `@types/node` dev dependencies.
 - `RELEASING.md` documenting the tag-triggered release flow.
 - Dependabot batching (`open-pull-requests-limit: 5` and update groups), and `*.tgz` in `.gitignore`.
 - The publish workflow verifies the CHANGELOG entry for the released version, asserts the packed file list, smoke-tests the tarball from a clean consumer install, and creates a GitHub Release from the CHANGELOG section.
@@ -80,7 +80,7 @@
 - The orchestrator agent now gets a default description.
 - New `restrictTask` option: when `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents (closes the "delegate to an unrestricted agent" loophole).
 - GitHub issue templates (`bug_report`, `feature_request`) and a pull request template.
-- `npm run test:coverage` script, and `CHANGELOG.md` included in the published package `files`.
+- `bun run test:coverage` script, and `CHANGELOG.md` included in the published package `files`.
 
 ## 0.5.0 - 2026-08-04
 
