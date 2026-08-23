@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.1 - 2026-08-23
+
+### Changed
+
+- Internal restructuring: shared option parsing, directives, constants, and types moved to `src/core/`, with OpenCode 1 and OpenCode 2 adapters under `src/v1/` and `src/v2/`. Public exports (`default`, `OrchestratorPlugin`, `OrchestratorOptions`, `V2Context`, `V2Plugin`) and runtime behavior are unchanged.
+- Option parsing and validation now use a declarative zod schema; error messages, defaults, trimming, dedupe, empty-value coalescing, and the `orchestratorModels`/`orchestratorDepth` cross-check are preserved.
+- Tooling migrated from npm/Biome to Bun with ESLint and Prettier (`bun.lock`, `eslint.config.js`, `.prettierrc.json`); CI and contributing docs updated accordingly.
+
+### Added
+
+- New runtime dependency: `zod` (^4.4.3), used for option validation.
+
 ## 0.9.0 - 2026-08-22
 
 ### Added
