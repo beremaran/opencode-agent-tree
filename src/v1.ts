@@ -5,4 +5,4 @@
  * contract while older OpenCode releases continue to resolve a callable
  * plugin through `main` or the `./server` export.
  */
-export { default } from "./index.ts"
+export {default} from "./index.ts";
