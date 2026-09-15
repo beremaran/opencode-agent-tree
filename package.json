@@ -55,12 +55,12 @@
     "github": "beremaran"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.2",
-    "eslint": "^9.0.0",
+    "eslint": "^10.10.0",
     "prettier": "^3.0.0",
     "typescript-eslint": "^8.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "zod": "^4.4.3"
