@@ -1,9 +1,4 @@
-/**
- * The V2 plugin API uses normalized agent records instead of the mutable V1
- * config object. These structural types keep the package compatible with both
- * the V1 plugin package and the V2 Promise API without importing either V2
- * runtime package at load time.
- */
+/** Structural OpenCode 2 types; no runtime SDK import is needed at load time. */
 type V2PermissionEffect = "allow" | "deny" | "ask";
 
 export type V2PermissionRule = {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0 - 2026-09-15
+
+### Changed (Breaking)
+
+- Dropped the OpenCode 1 adapter; the package now supports OpenCode 2 only.
+
 ## 0.9.2 - 2026-09-15
 
 ### Changed

@@ -14,12 +14,6 @@
         "typescript": "^5.6.0",
         "typescript-eslint": "^8.0.0",
       },
-      "peerDependencies": {
-        "@opencode-ai/plugin": ">=1.18.11 <2",
-      },
-      "optionalPeers": [
-        "@opencode-ai/plugin",
-      ],
     },
   },
   "packages": {

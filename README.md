@@ -5,7 +5,7 @@ An [OpenCode](https://opencode.ai) plugin that turns the model into an **orchest
 - Zero-config setup: one plugin entry, one required option.
 - Works with built-in subagents (`general`, `explore`) and any user-defined agents.
 - Enforcement is layered: prompt directive + hard tool block.
-- OpenCode 2 is the primary runtime; a legacy OpenCode 1 server adapter remains available.
+- OpenCode 2 is the supported runtime.
 
 ## How it forces orchestration
 
@@ -66,9 +66,8 @@ Two placeholders are substituted at runtime:
 
 ## Compatibility and installation
 
-OpenCode 2 is the primary supported runtime. The package root and the
-repository's root `index.ts` export the V2 `{ id, setup }` plugin. The
-`./server` export remains available for legacy OpenCode 1 installations.
+OpenCode 2 is the supported runtime. The package root and the repository's
+root `index.ts` export the V2 `{ id, setup }` plugin.
 
 ### OpenCode 2
 
@@ -106,31 +105,15 @@ directory. OpenCode resolves the checkout through its package entrypoint:
 }
 ```
 
-### Legacy OpenCode 1
-
-The callable adapter remains available through the `./server` export and the
-legacy `plugin` configuration field:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [[
-    "@beremaran/opencode-agent-tree/server",
-    { "subagentModel": "anthropic/claude-sonnet-4-6" }
-  ]]
-}
-```
-
 Config is loaded at startup. **Restart OpenCode** after adding the plugin.
 
-> **Runtime:** this package ships **raw TypeScript** with no build step. OpenCode 2
-> loads the package root through its V2 export; the legacy `./server` export loads
-> the OpenCode 1 adapter. OpenCode executes plugin TypeScript with Bun. The
+> **Runtime:** this package ships **raw TypeScript** with no build step. OpenCode
+> loads the package root through its V2 export and executes plugin TypeScript with
+> Bun. The
 > `engines.node` requirement (`>=22.6`) is for local tooling and tests; it is not
 > a promise that plain Node.js can load the package entrypoint from `node_modules`.
 
-The package entrypoint is `src/v2.ts`; `src/index.ts` and `src/v1.ts` remain the
-legacy V1 implementation and entrypoint.
+The package entrypoint is `src/v2.ts`.
 
 ## Getting started: pick your default agent
 
@@ -172,21 +155,17 @@ you set `default_agent` yourself.
 | `agentModels`       | `Record<string,string>` | `{}`                          | Per-agent overrides, wins over `subagentModel`. Never applies to the orchestrator agent (it is never routed). |
 | `instructions`      | `string`             | —                                | Extra rules appended verbatim to the orchestrator system prompt. |
 | `blockedTools`      | `string[]`           | `["edit", "bash"]`               | Tool names hard-denied to the orchestrator. On OpenCode 2, `bash` maps to the `shell` action. `[]` = prompt-only enforcement. Names must match `[a-z0-9_-]+`. |
-| `restrictTask`      | `boolean`            | `false`                          | When `true`, the orchestrator gets ordered V2 `subagent` permission rules that deny `*` and allow each routed delegation target, so it can only delegate to routed subagents. Closes the "delegate to an unrestricted agent" loophole (see [Security](#security)). Without it, single-level orchestrators have no `subagent` rule, while final levels of chains (`orchestratorDepth > 1`) get a blanket `subagent` allow rule so delegation remains available. The legacy V1 adapter applies the equivalent rule to `permission.task`. |
+| `restrictTask`      | `boolean`            | `false`                          | When `true`, the orchestrator gets ordered V2 `subagent` permission rules that deny `*` and allow each routed delegation target, so it can only delegate to routed subagents. Closes the "delegate to an unrestricted agent" loophole (see [Security](#security)). Without it, single-level orchestrators have no `subagent` rule, while final levels of chains (`orchestratorDepth > 1`) get a blanket `subagent` allow rule so delegation remains available. |
 
-On OpenCode 2, the adapter writes `system` and ordered `permissions`; `bash`
-maps to the `shell` action and `task` maps to the `subagent` action. The legacy
-V1 adapter writes `prompt` and `permission`. The user-facing options stay the
-same across both APIs.
+The adapter writes `system` and ordered `permissions`; `bash` maps to the
+`shell` action and `task` maps to the `subagent` action.
 
 ### Permission keys gate tool families
 
 OpenCode 2 permissions are keyed by **action**, not by every individual tool
 name. One action covers a whole tool family, so when you write `blockedTools`
 use the key, not the tool name. For example, the `edit` action covers the `edit`,
-`write`, and `patch` tools, while `bash` is represented by the `shell` action in
-V2. The legacy V1 adapter uses the corresponding `permission` keys (`edit`,
-`bash`, `task`, and so on).
+`write`, and `patch` tools, while `bash` is represented by the `shell` action.
 
 ### Model precedence
 
@@ -260,9 +239,8 @@ each level re-plans, writes briefs, and reviews the level below it. Depth 3+
 should be reserved for genuinely large decompositions, and each level should
 be pointed at a model cheap enough to justify the overhead.
 
-OpenCode 2 does not require the legacy `subagent_depth` setting for these
-chains. The V2 adapter uses OpenCode 2 `subagent` permissions directly. The
-legacy V1 adapter still checks `subagent_depth`; see [Limitations](#limitations).
+The plugin uses OpenCode 2 `subagent` permissions directly; no separate
+`subagent_depth` setting is required for these chains.
 
 ## Example
 
@@ -333,35 +311,17 @@ without an entry fall back to `orchestratorModel`:
 }
 ```
 
-## Validation & warnings
+## Validation
 
-At startup the plugin validates the configuration and reports self-contradictory
-setups. There are two distinct failure modes:
-
-- **Factory-level option errors** — a missing `subagentModel`, an invalid
-  `provider/model` format, or a malformed `blockedTools` entry is logged at
-  `error` level and rethrown, aborting plugin load. OpenCode surfaces these as
-  config errors.
-- **Config-hook conditions** — such as a disabled orchestrator agent — **never
-  throw**. The plugin logs an `error` and simply does not apply its
-  configuration, so OpenCode continues with the original config. The plugin
-  cannot crash OpenCode through the config hook.
-
-Everything else logs a `warn` message and continues.
+At startup the plugin validates its options. Invalid values throw a config
+error and abort plugin loading; valid values are applied to the agent draft.
 
 | Condition | Result |
 | --------- | ------ |
-| The orchestrator agent named by `orchestratorAgent` is disabled | Error logged; the plugin's config is **not applied**; OpenCode continues with the original config |
 | `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (exactly one `/`, non-empty on both sides, no whitespace; dots, dashes, underscores, and colons are allowed in the model part, but not further slashes) | Config error, plugin load aborts |
 | `orchestratorDepth` is not a positive integer (`0`, `-1`, `1.5`, `"3"`, `null`, `NaN`) | Config error, plugin load aborts |
 | `orchestratorModels` has more entries than `orchestratorDepth`, or an entry is not `provider/model` format | Config error, plugin load aborts (the length error names both options) |
-| Legacy OpenCode 1: `orchestratorDepth` exceeds `subagent_depth` (default `1`) | Warning naming both values and the fix: set `"subagent_depth": N` in `opencode.json`, or delegation beyond the first hop fails with `Subagent depth limit reached` |
 | A `blockedTools` name does not match `[a-z0-9_-]+` (lowercase letters, digits, underscore, hyphen) | Config error, plugin load aborts |
-| `blockedTools` includes a directive-dependent tool (`task`, `todowrite`, `question`, `read`, `glob`, `grep`, `webfetch`, `websearch`) | Warning: the orchestrator is told to delegate with a tool it cannot use |
-| A blocked tool's existing permission on the orchestrator agent is a plain value other than `deny` and is overwritten with `deny` | Warning naming the tool and agent (an existing value that is already `deny` is not warned about) |
-| A blocked tool's existing permission on the orchestrator agent is command-scoped (an object of rules) and is replaced by a blanket `deny` | Separate warning naming the tool and agent |
-| An explicit `agents` list omits both built-in subagents (`general`, `explore`) | Warning: routing and the directive diverge |
-| `agents` contains a name that is neither a built-in subagent nor an agent in `opencode.json` | Warning: a phantom agent entry is created (typo protection) |
 
 ## Security
 
@@ -400,54 +360,27 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 - Enforcement is prompt + permission based. Non-compliant models can still cut
   corners — for example doing their own research instead of delegating — where
   the permission block does not forbid the action.
-- The `task` tool (V1) or `subagent` action (V2) is assumed to be available to
-  the orchestrator.
+- The `subagent` action is assumed to be available to the orchestrator.
 - Once work is delegated to a subagent, the plugin cannot stop it from doing
   that work.
 - **Each added orchestrator level multiplies LLM cost and latency.** Every
   level re-plans the request, writes briefs, and reviews the level below it, so
   `orchestratorDepth: N` performs roughly N times the orchestrator-level model
   calls of depth 1.
-- **Legacy OpenCode 1 limits agent nesting via `subagent_depth`.** OpenCode's
-  `subagent_depth` option (default `1`) controls how deeply subagents can spawn
-  further subagents: with the default, "primary agents can launch subagents but
-  prevents those subagents from launching additional subagents" (per OpenCode's
-  config docs). A delegation chain of depth `N` needs `N-1` nested `task`
-  hops, so it requires `"subagent_depth": N` (e.g. `3` for
-  `orchestratorDepth: 3`) in `opencode.json`. Without it, the final hop fails
-  with `Subagent depth limit reached` at runtime.
-- The package root targets OpenCode 2.0.0 or newer. The legacy callable
-  `./server` export targets OpenCode 1.18.11 or newer; OpenCode 2 does not use
-  the V1 `subagent_depth` warning.
+- The package targets OpenCode 2.0.0 or newer.
 
 ## Troubleshooting
 
 - **Reload after config changes.** OpenCode reloads watched local plugin files;
   restart it if a local source or option change is not picked up.
-- **Legacy V1 startup log.** A healthy V1 load logs
-  `Orchestrator "Manager" enabled; subagents -> <subagentModel>`, with extra
-  metadata (`routedAgents`, `orchestratorModel`, `blockedTools`,
-  `defaultAgent`) naming what was routed and which agent is the session
-  default.
-- **`The orchestrator agent "Manager" is disabled`** is logged as an error by
-  the V1 adapter and the plugin's configuration is **not applied** — but OpenCode continues
-  normally with the rest of your config. Enable the agent, or choose another
-  orchestrator, to get the plugin's behavior back.
-- **A warning you did not expect** — the warning cases above log at `warn`
-  level naming the offending tool, agent, or config value; the config is
-  probably not doing what you intend.
+- **A configuration error** — invalid options abort plugin loading; correct the
+  named option and restart OpenCode.
 - **With `orchestratorDepth > 1`, `Manager-2`/`Manager-3` show up in the agent
   picker (`/agent`).** That is expected: every orchestrator level is a real
   agent entry, defaults to `orchestratorModel` (or its `orchestratorModels[i]`
   entry), and has its hands-on tools denied. All level names are excluded from
   routing, so they never receive `subagentModel` and never trigger phantom-name
   warnings.
-- **`orchestratorDepth (N) exceeds OpenCode's subagent_depth (M)`** is a legacy
-  V1 warning. Set `"subagent_depth": N` in `opencode.json`, or lower
-  `orchestratorDepth`; V2 does not use this setting.
-- **OpenCode 2 shows no V1 startup summary log.** The V2 transform API has no
-  equivalent `client.app.log` hook in the compatibility surface; inspect the
-  generated `Manager` agent and its `permissions` instead.
 - **"My explicitly-configured agent model is not used"** — for the orchestrator
   this is expected: `orchestratorModel` unconditionally overrides it, and
   `agentModels` entries keyed to it are ignored. For subagents, an explicit
@@ -485,8 +418,7 @@ bun run check   # typecheck + lint + format + tests
 ```
 
 The package root loads the OpenCode 2 adapter (`index.ts` -> `src/v2.ts`). The
-legacy OpenCode 1 adapter is `src/index.ts` and is exported as `./server`.
-The checked-in `opencode.json` exercises the V2 adapter from the local checkout.
+checked-in `opencode.json` exercises the V2 adapter from the local checkout.
 Run `opencode debug agents` from the repository root to inspect the generated
 `Manager` agent and its `permissions`.
 

@@ -6,7 +6,7 @@
 export interface OrchestratorOptions {
     /**
      * Model used for ALL delegated work — every subagent spawned via the
-     * `task` tool. Format: "provider/model-id" (e.g. "anthropic/claude-sonnet-4-6").
+     * `subagent` action. Format: "provider/model-id" (e.g. "anthropic/claude-sonnet-4-6").
      *
      * Required. Agents that already declare an explicit `model` in
      * opencode.json are never overridden.
@@ -29,7 +29,7 @@ export interface OrchestratorOptions {
      * Number of orchestrator levels in the delegation chain. Default: 1. With
      * depth N the orchestrator levels are named `<orchestratorAgent>`,
      * `<orchestratorAgent>-2`, ..., `<orchestratorAgent>-N`. Intermediate
-     * levels (1..N-1) can only delegate to the next level via their `task`
+     * levels (1..N-1) can only delegate to the next level via their `subagent`
      * permission; only the final level's routed subagents (general, explore)
      * keep their hands-on tools.
      */
@@ -67,29 +67,20 @@ export interface OrchestratorOptions {
 
     /**
      * Tools hard-blocked for every orchestrator level via its agent
-     * `permission` config. Default: ["edit", "bash"]. Pass [] for prompt-only
+     * `permissions` config. Default: ["edit", "bash"]. Pass [] for prompt-only
      * enforcement.
      */
     blockedTools?: string[];
 
     /**
-     * When true, the FINAL orchestrator level's `permission.task` rule is set
+     * When true, the FINAL orchestrator level's `subagent` rule is set
      * to deny delegation to every agent except the routed subagents, so it can
      * only delegate to them. Intermediate levels always get a structurally
-     * pinned task rule (to the next level) regardless of this option. Default:
+     * pinned subagent rule (to the next level) regardless of this option. Default:
      * false.
      */
     restrictTask?: boolean;
 }
-
-export type AgentLike = {
-    model?: string;
-    mode?: string;
-    disable?: boolean;
-    description?: string;
-    prompt?: string;
-    permission?: Record<string, unknown>;
-};
 
 export type NormalizedOptions = {
     subagentModel: string;

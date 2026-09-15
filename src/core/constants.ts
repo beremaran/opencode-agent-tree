@@ -6,14 +6,12 @@ export const DEFAULTS = {
 } as const;
 
 /**
- * Built-in agents are not present in the merged config when the plugin
- * `config` hook runs, so the target entries must be created explicitly.
- * Entries created here are merged over the built-ins at agent lookup time.
+ * Built-in agents may not be present in the agent draft when the plugin
+ * transform runs, so target entries must be created explicitly.
  *
- * This list mirrors opencode's built-in subagents across the supported V1/V2
- * host ranges and must be updated if opencode adds or renames built-in
- * subagents. Note: `scout` appears in some newer opencode docs but is not a
- * native general-purpose subagent in the supported hosts, so it remains
+ * This list mirrors OpenCode's built-in subagents and must be updated if
+ * OpenCode adds or renames built-in subagents. Note: `scout` appears in some
+ * newer OpenCode docs but is not a native general-purpose subagent, so it remains
  * excluded until the host exposes it as a real agent.
  */
 export const BUILTIN_SUBAGENTS = ["general", "explore"];
@@ -23,8 +21,8 @@ export const BUILTIN_SUBAGENTS = ["general", "explore"];
  * even when absent from the merged config, so candidates with these names are
  * excluded from routing (and from the phantom-name warning).
  *
- * This list mirrors opencode's built-in agents across the supported V1/V2
- * host ranges and must be updated if opencode adds or renames built-ins.
+ * This list mirrors OpenCode's built-in agents and must be updated if OpenCode
+ * adds or renames built-ins.
  */
 export const KNOWN_BUILTINS = ["build", "plan", "compaction", "title", "summary"];
 
