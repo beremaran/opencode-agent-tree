@@ -1,7 +1,7 @@
 {
   "name": "@beremaran/opencode-agent-tree",
-  "version": "0.10.0",
-  "description": "OpenCode plugin that enforces task decomposition and delegates work to configurable subagents.",
+  "version": "0.11.0",
+  "description": "OpenCode plugin that enforces recursive decomposition delegation.",
   "type": "module",
   "sideEffects": false,
   "main": "./src/v2.ts",
@@ -61,8 +61,5 @@
     "prettier": "^3.0.0",
     "typescript-eslint": "^8.0.0",
     "typescript": "^5.6.0"
-  },
-  "dependencies": {
-    "zod": "^4.4.3"
   }
 }

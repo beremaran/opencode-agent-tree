@@ -1,14 +1,8 @@
 #!/usr/bin/env node
-/**
- * Runtime smoke test for the OpenCode 2 plugin.
- *
- * Uses the current `opencode debug agents` command against the checked-in
- * local-checkout config and verifies the generated orchestrator agent.
- * Requires the `opencode` CLI on PATH (override with OPENCODE_BIN).
- */
+/** Runtime smoke test for the OpenCode 2 plugin. */
 
 import {spawn} from "node:child_process";
-import {mkdtempSync, rmSync} from "node:fs";
+import {mkdtempSync, rmSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {dirname, join, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
@@ -16,74 +10,128 @@ import {fileURLToPath} from "node:url";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OPENCODE_BIN = process.env.OPENCODE_BIN || "opencode";
 
-const run = (command, args, options) =>
-    new Promise((resolve_) => {
-        const child = spawn(command, args, options);
-        let stdout = "";
-        let stderr = "";
-        child.stdout.on("data", (chunk) => {
-            stdout += chunk;
-        });
-        child.stderr.on("data", (chunk) => {
-            stderr += chunk;
-        });
-        child.on("error", (error) => resolve_({code: null, error, stdout, stderr}));
-        child.on("close", (code, signal) => resolve_({code, signal, stdout, stderr}));
+const hasPermission = (agent, action, resource, effect) =>
+    Array.isArray(agent?.permissions) &&
+    agent.permissions.some((rule) => rule.action === action && rule.resource === resource && rule.effect === effect);
+
+const startServer = (cwd, configDir) => {
+    const env = {...process.env, OPENCODE_CONFIG_DIR: configDir};
+    delete env.OPENCODE_CONFIG;
+    delete env.OPENCODE_CONFIG_CONTENT;
+    const server = spawn(OPENCODE_BIN, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
+        cwd,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
     });
 
-const hasPermission = (agent, action, effect) =>
-    Array.isArray(agent?.permissions) &&
-    agent.permissions.some((rule) => rule.action === action && rule.resource === "*" && rule.effect === effect);
+    return new Promise((resolve_, reject) => {
+        let output = "";
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            server.kill();
+            reject(new Error(`OpenCode server did not start${output ? `:\n${output}` : ""}`));
+        }, 15_000);
+        const onOutput = (chunk) => {
+            output += chunk;
+            const match = output.match(/server listening on (https?:\/\/[^\s]+)[\r\n]+server password ([^\s]+)/);
+            if (!match || settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve_({server, url: match[1], password: match[2]});
+        };
+        server.stdout.on("data", onOutput);
+        server.stderr.on("data", onOutput);
+        server.once("error", (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(error);
+        });
+        server.once("exit", (code) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error(`OpenCode server exited with code ${code}${output ? `:\n${output}` : ""}`));
+        });
+    });
+};
+
+const stopServer = async (server) => {
+    if (server.exitCode !== null) return;
+    server.kill();
+    await new Promise((resolve_) => server.once("exit", resolve_));
+};
+
+const getAgent = async (url, password, id) => {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+        const response = await fetch(`${url}/api/agent/${encodeURIComponent(id)}`, {
+            headers: {authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`},
+        });
+        const body = await response.text();
+        if (response.ok) return JSON.parse(body).data;
+        if (response.status !== 404) {
+            throw new Error(`OpenCode agent request failed (${response.status}): ${body}`);
+        }
+        await new Promise((resolve_) => setTimeout(resolve_, 100));
+    }
+    throw new Error(`OpenCode agent "${id}" was not available after plugin activation`);
+};
 
 const main = async () => {
-    const xdgHome = mkdtempSync(join(tmpdir(), "opencode-agent-tree-xdg-"));
+    const configDir = mkdtempSync(join(tmpdir(), "opencode-agent-tree-config-"));
+    const workspace = mkdtempSync(join(tmpdir(), "opencode-agent-tree-workspace-"));
+    let server;
     try {
-        const result = await run(OPENCODE_BIN, ["debug", "agents"], {
-            cwd: REPO_ROOT,
-            env: {...process.env, XDG_CONFIG_HOME: xdgHome},
-            stdio: ["ignore", "pipe", "pipe"],
-        });
+        writeFileSync(
+            join(workspace, "opencode.json"),
+            JSON.stringify(
+                {
+                    $schema: "https://opencode.ai/config.json",
+                    default_agent: "Manager",
+                    plugins: [{package: REPO_ROOT}],
+                },
+                null,
+                2,
+            ),
+        );
+        const started = await startServer(workspace, configDir);
+        server = started.server;
 
-        if (result.error || result.code !== 0) {
-            throw new Error(result.error?.message ?? (result.stderr.trim() || `exit code ${result.code}`));
-        }
+        const manager = await getAgent(started.url, started.password, "Manager");
+        const general = await getAgent(started.url, started.password, "general");
+        const explore = await getAgent(started.url, started.password, "explore");
 
-        let agents;
-        try {
-            agents = JSON.parse(result.stdout);
-        } catch (error) {
-            throw new Error(`opencode debug agents did not return JSON: ${error.message}\n${result.stdout}`);
+        if (manager.mode !== "primary") throw new Error(`Manager mode was ${JSON.stringify(manager.mode)}`);
+        if (!manager.system?.includes("# Recursive Decomposition Delegation")) {
+            throw new Error("Manager system prompt does not contain the delegation directive");
         }
-
-        if (!Array.isArray(agents)) {
-            throw new Error("opencode debug agents returned a non-array result");
+        if (!hasPermission(manager, "*", "*", "deny")) {
+            throw new Error("Manager does not deny wildcard actions");
         }
-
-        const manager = agents.find((agent) => agent.id === "Manager");
-        if (!manager) {
-            throw new Error('generated "Manager" agent was not found');
+        if (!hasPermission(manager, "subagent", "general", "allow")) {
+            throw new Error("Manager cannot delegate to general");
         }
-        for (const name of ["general", "explore"]) {
-            if (!agents.some((agent) => agent.id === name)) {
-                throw new Error(`built-in "${name}" agent was not found`);
-            }
+        if (
+            !general.system?.includes("# Recursive Worker Mode") ||
+            !hasPermission(general, "subagent", "explore", "allow")
+        ) {
+            throw new Error("general does not have recursive worker delegation enabled");
         }
-        if (manager.mode !== "primary") {
-            throw new Error(`Manager mode was ${JSON.stringify(manager.mode)}`);
-        }
-        if (typeof manager.system !== "string" || !manager.system.includes("# Orchestrator Mode")) {
-            throw new Error("Manager system prompt does not contain the orchestrator directive");
-        }
-        for (const action of ["edit", "shell"]) {
-            if (!hasPermission(manager, action, "deny")) {
-                throw new Error(`Manager does not deny the ${action} action`);
-            }
+        if (
+            !explore.system?.includes("# Recursive Worker Mode") ||
+            !hasPermission(explore, "subagent", "general", "allow")
+        ) {
+            throw new Error("explore does not have recursive worker delegation enabled");
         }
 
         console.log("PASS OpenCode 2 local plugin smoke test");
-        console.log("Manager: mode=primary, edit=deny, shell=deny");
+        console.log("Manager: mode=primary, wildcard actions=deny, subagent=general");
     } finally {
-        rmSync(xdgHome, {recursive: true, force: true});
+        if (server) await stopServer(server);
+        rmSync(workspace, {recursive: true, force: true});
+        rmSync(configDir, {recursive: true, force: true});
     }
 };
 
