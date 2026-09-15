@@ -1,14 +1,10 @@
 {
   "name": "@beremaran/opencode-agent-tree",
   "version": "0.9.1",
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
-  "description": "Force opencode to act as an orchestrator: every task is decomposed and delegated to subagents, with user-configurable models per agent.",
+  "description": "OpenCode plugin that enforces task decomposition and delegates work to configurable subagents.",
   "type": "module",
   "sideEffects": false,
-  "main": "./src/v1.ts",
+  "main": "./src/v2.ts",
   "types": "./src/v2.ts",
   "exports": {
     ".": {
@@ -22,10 +18,11 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "index.ts",
     "src",
     "CHANGELOG.md"
   ],
-  "homepage": "https://github.com/beremaran/opencode-agent-tree",
+  "homepage": "https://github.com/beremaran/opencode-agent-tree#readme",
   "bugs": {
     "url": "https://github.com/beremaran/opencode-agent-tree/issues"
   },
@@ -41,17 +38,16 @@
     "lint": "eslint src test",
     "format": "prettier --write src test",
     "format:check": "prettier --check src test",
-    "check": "bun run typecheck && bun run lint && bun run format:check && bun run test",
-    "prepublishOnly": "bun run check"
+    "check": "bun run typecheck && bun run lint && bun run format:check && bun run test"
   },
   "keywords": [
     "opencode",
-    "plugin",
-    "orchestrator",
+    "opencode-plugin",
     "subagent",
-    "task",
-    "delegate",
-    "swarm"
+    "orchestration",
+    "delegation",
+    "agent",
+    "task"
   ],
   "author": "Berke Arslan <berke@beremaran.com>",
   "repository": {
@@ -63,7 +59,7 @@
     "github": "beremaran"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.18.11 || ^0.0.0-beta"
+    "@opencode-ai/plugin": ">=1.18.11 <2"
   },
   "peerDependenciesMeta": {
     "@opencode-ai/plugin": {

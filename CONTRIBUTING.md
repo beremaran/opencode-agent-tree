@@ -8,32 +8,20 @@ Thanks for contributing to @beremaran/opencode-agent-tree!
 2. `bun install`
 3. `bun run check`
 
-The plugin has no runtime dependencies — it runs as a single `config` hook
-loaded by opencode (Bun runtime). There is no build step.
+The plugin has one runtime dependency (`zod`) and ships raw TypeScript. OpenCode
+loads the V2 plugin with Bun; there is no build step.
 
 ## Manual testing
 
-The repo root ships an `opencode.json` pre-wired to load `./src/index.ts`.
-Run `opencode` from the repo root, then ask something that requires a tool,
-e.g.:
-
-> Create a file named test.txt containing "hello".
+The repo root ships an `opencode.json` pre-wired to load the local checkout as
+an OpenCode 2 plugin. Run `opencode debug agents` from the repo root.
 
 Expected behavior:
 
-1. The orchestrator agent (`Manager`, created by the plugin) does **not** edit
-   the file itself.
-2. It delegates the work to a subagent via the `task` tool — in opencode the
-   work appears as a delegated task from the orchestrator, not as direct work
-   by the `Manager` agent.
-3. The subagent runs with the model configured in `subagentModel`
-   (check `opencode run --print-logs` for the `stream` lines).
-
-Verify the startup log line is present:
-
-```
-Orchestrator "Manager" enabled; subagents -> <subagentModel>
-```
+1. The generated `Manager` agent exists with `mode: "primary"`.
+2. Its system prompt contains the orchestrator directive.
+3. Its `edit` and `shell` permissions are denied, while the built-in `general`
+   and `explore` agents remain available.
 
 ## Writing tests
 
@@ -53,12 +41,13 @@ Orchestrator "Manager" enabled; subagents -> <subagentModel>
 
 - Keep changes minimal and scoped.
 - Run `bun run check` before pushing; CI enforces it.
-- If you change the directive prompt (`orchestratorDirective` in `src/index.ts`),
+- If you change the directive prompt (`orchestratorDirective` in
+  `src/core/directives.ts`),
   update the copy in `README.md` to match. The rendered directive block in the
   README is asserted byte-for-byte against the code's rendered directive, so a
   prompt change **must** update both.
 - If you change observable behavior, update `CHANGELOG.md` under
-  `## [Unreleased]` and the README where relevant.
+  a new version heading and the README where relevant.
 - Use [Conventional Commits](https://www.conventionalcommits.org/) style
   (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, …); releases use
   `chore: release vX.Y.Z` (see [RELEASING.md](RELEASING.md)).
@@ -68,9 +57,9 @@ Orchestrator "Manager" enabled; subagents -> <subagentModel>
 
 - `.opencode/` is intentionally **untracked**: it carries its own self-ignoring
   `.gitignore` (ignoring itself), so a fresh clone will not contain it. It is a
-  local working area (e.g. saved workflows), not part of the published package.
+  local working area (e.g. saved workflows), not part of the package.
 
 ## Releases
 
-Releases are tag-triggered from CI — see [RELEASING.md](RELEASING.md) for the
-full flow (bump version, add a CHANGELOG entry, tag `vX.Y.Z`, push the tag).
+See [RELEASING.md](RELEASING.md) for the release flow (bump version, add a
+CHANGELOG entry, tag `vX.Y.Z`, and create the GitHub Release).

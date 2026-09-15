@@ -83,16 +83,14 @@
 - New `orchestratorDepth` option (default `1`): with `N` the plugin creates a chain of N orchestrator-only agents (`<orchestratorAgent>`, `<orchestratorAgent>-2`, ..., `<orchestratorAgent>-N`). Intermediate levels are structurally restricted to delegate only to the next level (`permission.task` is pinned to `{ "*": "deny", "<next-level>": "allow" }` regardless of `restrictTask`); the final level delegates to the routed subagents (`general`/`explore`, ...), which keep their hands-on tools. Every level defaults to `orchestratorModel`, gets the denied hands-on tools, and receives a level-aware directive prompt (level 1 keeps the existing `# Orchestrator Mode (enforced by @beremaran/opencode-agent-tree)` header exactly). Backward compatible: `orchestratorDepth: 1` reproduces the previous single-orchestrator behavior byte-for-byte. Requires opencode `subagent_depth >= N` for chains of depth `N` (see README Limitations).
 - Exported `OrchestratorOptions` type in `src/index.ts` for typed plugin options.
 - ESLint and Prettier checks (`bun run lint` runs ESLint and `bun run format:check` runs Prettier); `bun run check` now runs typecheck, lint, formatting, and tests; CI runs lint and runs the test suite under Bun.
-- `prepublishOnly` runs the full check suite before publishing.
 - `sideEffects: false`, `homepage`, `bugs`, and a `./package.json` export in `package.json`, plus ESLint, Prettier, `typescript-eslint`, and `@types/node` dev dependencies.
 - `RELEASING.md` documenting the tag-triggered release flow.
 - Dependabot batching (`open-pull-requests-limit: 5` and update groups), and `*.tgz` in `.gitignore`.
-- The publish workflow verifies the CHANGELOG entry for the released version, asserts the packed file list, smoke-tests the tarball from a clean consumer install, and creates a GitHub Release from the CHANGELOG section.
 - Tests were converted to TypeScript and expanded to cover the new routing, conversion, permission, and config-hook behaviors.
 - The orchestrator agent now gets a default description.
 - New `restrictTask` option: when `true`, the orchestrator's permission gets `task: { "*": "deny", "<target>": "allow" }` for each routed delegation target, so it can only delegate to routed subagents (closes the "delegate to an unrestricted agent" loophole).
 - GitHub issue templates (`bug_report`, `feature_request`) and a pull request template.
-- `bun run test:coverage` script, and `CHANGELOG.md` included in the published package `files`.
+- `bun run test:coverage` script, and `CHANGELOG.md` included in the package `files`.
 
 ## 0.5.0 - 2026-08-04
 
@@ -118,7 +116,7 @@
 - `blockedTools` entries are validated as tool names (`[a-z0-9_-]+`), preventing malformed entries from being interpolated into the orchestrator's system prompt.
 - Warnings for likely misconfigurations: blocking tools the orchestrator directive depends on, overwriting existing non-`deny` permissions, explicit `agents` lists that omit the built-in subagents, and agent names that do not exist (typo protection).
 - `engines` (`>=22.6`), a `types` entry, a narrowed peer range (`>=1.18.11 <2`), and a `funding` field in package.json.
-- CI: node 22/24 matrix, Bun smoke test, peer-drift check, and Dependabot; the publish workflow now authenticates via `NPM_TOKEN` and smoke-tests the packed tarball.
+- CI: node 22/24 matrix, Bun smoke test, peer-drift check, and Dependabot.
 - `SECURITY.md` and `CODE_OF_CONDUCT.md`, plus expanded README sections (validation & warnings, security, limitations, troubleshooting, model precedence).
 
 ## 0.4.0 - 2026-08-03
