@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.2 - 2026-09-15
+
+### Changed
+
+- Updated documentation and metadata for the OpenCode 2 CLI, `plugins` config,
+  GitHub installation, local checkout loading, V2 permissions, and development
+  workflow.
+- Replaced the legacy OpenCode 1 HTTP smoke test with an OpenCode 2
+  `opencode debug agents` smoke test.
+- Removed npm registry publication configuration and release automation; releases
+  use Git tags and GitHub Releases.
+
 ## 0.9.1 - 2026-08-23
 
 ### Changed

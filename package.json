@@ -1,6 +1,6 @@
 {
   "name": "@beremaran/opencode-agent-tree",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "OpenCode plugin that enforces task decomposition and delegates work to configurable subagents.",
   "type": "module",
   "sideEffects": false,
