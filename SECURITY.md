@@ -26,16 +26,17 @@ issue publicly until it has been addressed.
 
 ## Known security considerations
 
-This plugin enforces behavior through OpenCode's agent configuration, so its
-security surface is the configuration it runs with. Only use the plugin with
-config you control.
+This plugin enforces behavior through configuration, so its security surface is
+the configuration it runs with. Only use the plugin with config you control.
 
-- **The root block uses the V2 wildcard action.** The only action family enabled
-  afterward is `subagent`, scoped to `general`.
-- **Recursive worker delegation is prompt-guided.** The current plugin API does
-  not expose semantic complexity evaluation or dynamic permissions, so a worker
-  can technically act before delegating.
-- **Workers keep their hands-on tools.** This is required for atomic work and
-  means worker prompts and agent configuration remain part of the trust boundary.
-- **The plugin does not choose models.** Models and worker definitions come
-  from OpenCode configuration.
+- **`instructions` is injected verbatim** into the orchestrator's system
+  prompt. An untrusted configuration can inject prompt rules that the model
+  may follow.
+- **The tool block is an explicit allow/deny list, not categorical.** A renamed
+  or future mutating tool would not be auto-blocked.
+- **Subagents keep their hands-on tools.** Delegation does not remove tools
+  from subagents; the plugin constrains the orchestrator, not the subagents.
+- **`orchestratorModel` overrides an explicitly configured model** on the
+  orchestrator agent.
+
+The README's Security section describes these same considerations in prose.

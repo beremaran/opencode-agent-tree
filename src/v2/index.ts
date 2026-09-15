@@ -1,18 +1,24 @@
-import {
-    BUILTIN_WORKERS,
-    FIRST_WORKER_AGENT,
-    KNOWN_PRIMARY_AGENTS,
-    MANAGER_AGENT,
-    MANAGER_DIRECTIVE_MARKER,
-    PLUGIN_ID,
-    ROOT_BLOCKED_ACTION,
-    WORKER_DIRECTIVE_MARKER,
-} from "../core/constants.ts";
-import {hasExplicitScope, managerDirective, workerDirective} from "../core/delegation.ts";
+import {BUILTIN_SUBAGENTS, KNOWN_BUILTINS, PLUGIN_ID} from "../core/constants.ts";
+import {hasExplicitScope, levelDirectiveMarker, orchestratorDirective} from "../core/directives.ts";
+import {isRecord, normalizeOptions, orchestratorLevels} from "../core/options.ts";
+import type {NormalizedOptions} from "../core/types.ts";
 import type {V2Agent, V2AgentDraft, V2PermissionRule, V2Context, V2Plugin} from "./types.ts";
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-    typeof value === "object" && value !== null && !Array.isArray(value);
+const V2_ACTIONS: Record<string, string> = {
+    bash: "shell",
+    task: "subagent",
+};
+
+const v2Action = (name: string): string => V2_ACTIONS[name] ?? name;
+
+const v2Model = (model: string, existing: V2Agent["model"]): NonNullable<V2Agent["model"]> => {
+    const separator = model.indexOf("/");
+    return {
+        providerID: model.slice(0, separator),
+        id: model.slice(separator + 1),
+        ...(existing?.variant ? {variant: existing.variant} : {}),
+    };
+};
 
 const v2EnsureAgent = (draft: V2AgentDraft, name: string): V2Agent => {
     let entry: V2Agent | undefined;
@@ -42,80 +48,94 @@ const v2AddPermission = (entry: V2Agent, rule: V2PermissionRule): void => {
     entry.permissions.push(rule);
 };
 
-const v2TaskRule = (entry: V2Agent, targets: readonly string[]): void => {
+const v2DenyTools = (entry: V2Agent, blockedTools: string[]): void => {
+    for (const tool of blockedTools) {
+        v2AddPermission(entry, {action: v2Action(tool), resource: "*", effect: "deny"});
+    }
+};
+
+const v2TaskRule = (entry: V2Agent, targets: string[], restrict: boolean): void => {
     v2AddPermission(entry, {action: "subagent", resource: "*", effect: "deny"});
+    if (!restrict) {
+        v2AddPermission(entry, {action: "subagent", resource: "*", effect: "allow"});
+        return;
+    }
     for (const target of targets) {
         v2AddPermission(entry, {action: "subagent", resource: target, effect: "allow"});
     }
 };
 
-const appendDirective = (entry: V2Agent, directive: string, marker: string): void => {
-    if (entry.system?.includes(marker)) {
-        return;
+const v2InScope = (name: string, entry: V2Agent | undefined, levelNames: Set<string>): boolean =>
+    !KNOWN_BUILTINS.includes(name) && entry?.mode !== "primary" && !levelNames.has(name);
+
+const v2ApplyConfig = (draft: V2AgentDraft, opts: NormalizedOptions): void => {
+    const levels = orchestratorLevels(opts);
+    const levelNames = new Set(levels);
+    const candidates = opts.agents ?? [...BUILTIN_SUBAGENTS, ...draft.list().map((entry) => entry.id)];
+    const targets = [...new Set(candidates)].filter((name) => v2InScope(name, draft.get(name), levelNames));
+
+    for (const name of targets) {
+        const entry = v2EnsureAgent(draft, name);
+        if (!entry.model) {
+            entry.model = v2Model(
+                Object.hasOwn(opts.agentModels, name) ? opts.agentModels[name] : opts.subagentModel,
+                entry.model,
+            );
+        }
     }
-    entry.system = entry.system ? `${entry.system}\n\n${directive}` : directive;
+
+    for (let index = 0; index < levels.length; index += 1) {
+        const name = levels[index];
+        const level = index + 1;
+        const depth = opts.orchestratorDepth;
+        const isFinal = level === depth;
+        const entry = v2EnsureAgent(draft, name);
+        const levelModel = opts.orchestratorModels?.[level - 1] ?? opts.orchestratorModel;
+
+        if (!entry.description) {
+            entry.description =
+                level === 1
+                    ? "Orchestrator agent: decomposes every request and delegates to subagents."
+                    : isFinal
+                      ? `Orchestrator agent (level ${level}/${depth}): decomposes requests from the level above and delegates to the routed subagents.`
+                      : `Orchestrator agent (level ${level}/${depth}): decomposes requests from the level above and delegates to the next level.`;
+        }
+        entry.mode = level === 1 ? "primary" : "subagent";
+        if (levelModel) {
+            entry.model = v2Model(levelModel, entry.model);
+        }
+        v2DenyTools(entry, opts.blockedTools);
+
+        if (isFinal) {
+            if (depth > 1 || (opts.restrictTask && targets.length > 0)) {
+                v2TaskRule(entry, targets, opts.restrictTask && targets.length > 0);
+            }
+        } else {
+            v2TaskRule(entry, [levels[index + 1]], true);
+        }
+        if (level > 1) {
+            v2AddPermission(entry, {action: "todowrite", resource: "*", effect: "allow"});
+        }
+
+        const marker = levelDirectiveMarker(level, depth);
+        if (!entry.system?.includes(marker)) {
+            const directive = orchestratorDirective(opts, level, depth, isFinal ? undefined : levels[index + 1]);
+            entry.system = entry.system ? `${entry.system}\n\n${directive}` : directive;
+        }
+    }
 };
 
-const isEligibleWorker = (name: string, entry: V2Agent | undefined): boolean =>
-    name !== MANAGER_AGENT &&
-    !KNOWN_PRIMARY_AGENTS.includes(name as (typeof KNOWN_PRIMARY_AGENTS)[number]) &&
-    entry?.mode !== "primary" &&
-    entry?.mode !== "disabled";
-
-const workerNames = (draft: V2AgentDraft): string[] => {
-    const names = [...BUILTIN_WORKERS, ...draft.list().map((entry) => entry.id)];
-    return [...new Set(names)].filter((name) => isEligibleWorker(name, draft.get(name)));
-};
-
-const v2ApplyConfig = (draft: V2AgentDraft): string[] => {
-    const workers = workerNames(draft);
-    const manager = v2EnsureAgent(draft, MANAGER_AGENT);
-    manager.mode = "primary";
-    manager.description ??= "Root agent that delegates every actionable request to recursive workers.";
-    appendDirective(manager, managerDirective(), MANAGER_DIRECTIVE_MARKER);
-    v2AddPermission(manager, {action: ROOT_BLOCKED_ACTION, resource: "*", effect: "deny"});
-    v2TaskRule(manager, [FIRST_WORKER_AGENT]);
-
-    for (const name of workers) {
-        const worker = v2EnsureAgent(draft, name);
-        worker.mode ??= "subagent";
-        appendDirective(worker, workerDirective(), WORKER_DIRECTIVE_MARKER);
-        v2TaskRule(
-            worker,
-            workers.filter((target) => target !== name),
-        );
-    }
-
-    return workers;
-};
-
-const assertZeroConfig = (options: unknown): void => {
-    if (options == null) {
-        return;
-    }
-    if (!isRecord(options)) {
-        throw new Error(`[${PLUGIN_ID}] This plugin is zero-config and does not accept options.`);
-    }
-    const keys = Object.keys(options);
-    if (keys.length > 0) {
-        throw new Error(
-            `[${PLUGIN_ID}] This plugin is zero-config; remove unsupported option${keys.length === 1 ? "" : "s"}: ${keys.join(", ")}.`,
-        );
-    }
-};
-
-const v2RuntimeGuard = async (context: V2Context, workers: readonly string[]): Promise<void> => {
+const v2RuntimeGuard = async (context: V2Context, opts: NormalizedOptions): Promise<void> => {
     const hook = context.tool?.hook;
     if (!hook) {
         return;
     }
 
-    const workerSet = new Set(workers);
     await hook("execute.before", async (event) => {
-        if (event.agent === MANAGER_AGENT && event.tool !== "task" && event.tool !== "subagent") {
-            throw new Error(`[${PLUGIN_ID}] Manager is delegation-only and cannot execute "${event.tool}".`);
+        if (event.tool !== "task" && event.tool !== "subagent") {
+            return;
         }
-        if ((event.tool !== "task" && event.tool !== "subagent") || !workerSet.has(event.agent)) {
+        if (!orchestratorLevels(opts).includes(event.agent)) {
             return;
         }
 
@@ -125,21 +145,17 @@ const v2RuntimeGuard = async (context: V2Context, workers: readonly string[]): P
             return;
         }
 
-        throw new Error(
-            `[${PLUGIN_ID}] Recursive delegation rejected: brief lacks explicit target file, directory, or module scope.`,
-        );
+        const message = `[${PLUGIN_ID}] Delegation rejected: subtask brief lacks explicit target file, directory, or module scope. Specify exact paths or boundaries for the worker subagent.`;
+        throw new Error(message);
     });
 };
 
 const V2_PLUGIN: V2Plugin = {
     id: PLUGIN_ID,
     setup: async (context) => {
-        assertZeroConfig(context.options);
-        let workers: string[] = [];
-        await context.agent.transform((draft) => {
-            workers = v2ApplyConfig(draft);
-        });
-        await v2RuntimeGuard(context, workers);
+        const opts = normalizeOptions(context.options ?? {});
+        await context.agent.transform((draft) => v2ApplyConfig(draft, opts));
+        await v2RuntimeGuard(context, opts);
     },
 };
 

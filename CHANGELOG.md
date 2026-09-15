@@ -1,18 +1,5 @@
 # Changelog
 
-## 0.11.0 - 2026-09-16
-
-### Changed (Breaking)
-
-- Reframed the plugin around recursive decomposition delegation instead of a
-  generated orchestrator chain.
-- Made the plugin zero-config: `Manager` is the fixed toolless root, models and
-  worker definitions stay in OpenCode, and legacy options are rejected.
-- Added recursive worker guidance and native `subagent` permissions for enabled
-  non-primary agents.
-- Removed model routing, depth, target-list, custom-instruction, and tree-level
-  configuration.
-
 ## 0.10.0 - 2026-09-15
 
 ### Changed (Breaking)
