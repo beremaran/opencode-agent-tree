@@ -1,0 +1,5 @@
+# Normalize line endings: store LF in the repository and check it out as LF
+# everywhere. Without this, a Windows checkout with core.autocrlf=true gets
+# CRLF in the working tree, so `bun run format:check` fails on an otherwise
+# clean clone because Prettier is configured with endOfLine: lf.
+* text=auto eol=lf
