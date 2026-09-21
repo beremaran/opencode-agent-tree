@@ -29,7 +29,13 @@ export const KNOWN_BUILTINS = ["build", "plan", "compaction", "title", "summary"
 export const DIRECTIVE_TOOLS = ["task", "todowrite", "question", "read", "glob", "grep", "webfetch", "websearch"];
 
 export const BLOCKED_TOOL_PATTERN = /^[a-z0-9_-]+$/;
-export const MODEL_PATTERN = /^[^\s/]+\/[^\s/]+$/;
+
+/**
+ * A model id is `provider/model` where provider is the first `/`-delimited
+ * segment, and the model portion (starting with non-whitespace/non-slash) may
+ * contain further slashes plus special characters like `~`.
+ */
+export const MODEL_PATTERN = /^[^\s/]+\/[^/\s](?:[^/\s]|\/[^\s])*$/;
 
 /**
  * The rendered header line of the level-1 directive. Level 1 keeps this
