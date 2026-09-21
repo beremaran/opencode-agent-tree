@@ -318,7 +318,7 @@ error and abort plugin loading; valid values are applied to the agent draft.
 
 | Condition | Result |
 | --------- | ------ |
-| `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (exactly one `/`, non-empty on both sides, no whitespace; dots, dashes, underscores, and colons are allowed in the model part, but not further slashes) | Config error, plugin load aborts |
+| `subagentModel`, `orchestratorModel`, or an `agentModels` value is not `provider/model` format (provider is the first `/` segment; non-empty on both sides, no whitespace; the model part may itself contain further slashes) | Config error, plugin load aborts |
 | `orchestratorDepth` is not a positive integer (`0`, `-1`, `1.5`, `"3"`, `null`, `NaN`) | Config error, plugin load aborts |
 | `orchestratorModels` has more entries than `orchestratorDepth`, or an entry is not `provider/model` format | Config error, plugin load aborts (the length error names both options) |
 | A `blockedTools` name does not match `[a-z0-9_-]+` (lowercase letters, digits, underscore, hyphen) | Config error, plugin load aborts |

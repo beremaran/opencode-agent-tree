@@ -22,7 +22,7 @@ const nonEmptyString = (name: string) =>
         z.string({error: mustBe(name, "a non-empty string")}).min(1, {error: mustBe(name, "a non-empty string")}),
     );
 
-/** Non-empty trimmed string constrained to `provider/model` ids. */
+/** Non-empty string for `provider/model` format; model part may have more slashes. */
 const modelString = (name: string) =>
     nonEmptyString(name).superRefine((model, ctx) => {
         if (!MODEL_PATTERN.test(model)) {
@@ -68,7 +68,10 @@ const OPTIONS_SCHEMA = z
                 .default(1),
             orchestratorModels: z
                 .array(modelString("orchestratorModels"), {
-                    error: mustBe("orchestratorModels", "an array of `provider/model` ids"),
+                    error: mustBe(
+                        "orchestratorModels",
+                        "an array of model ids like `provider/model`, where the model may contain further slashes",
+                    ),
                 })
                 .transform((models) => [...new Set(models)])
                 .transform((models) => (models.length === 0 ? undefined : models))

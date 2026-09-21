@@ -116,3 +116,76 @@ test("runtime guard rejects an unscoped long subagent brief", async () => {
 test("requires a delegated-work model", async () => {
     await assert.rejects(() => apply({}), /subagentModel.*required/);
 });
+
+// Regression tests for MODEL_PATTERN accepting slashes in the model portion.
+test("accepts subagentModel with further slashes, split at FIRST slash", async () => {
+    const {agents} = await apply({subagentModel: "openrouter/~deepseek/deepseek-flash-latest"}, [
+        createAgent("general"),
+    ]);
+    assert.deepEqual(agents.get("general")?.model, {
+        providerID: "openrouter",
+        id: "~deepseek/deepseek-flash-latest",
+    });
+});
+
+test("accepts subagentModel with two slashes", async () => {
+    const {agents} = await apply({subagentModel: "openrouter/deepseek/deepseek-v4.1-flash"}, [createAgent("general")]);
+    assert.deepEqual(agents.get("general")?.model, {
+        providerID: "openrouter",
+        id: "deepseek/deepseek-v4.1-flash",
+    });
+});
+
+test("orchestratorModel with further slashes sets Manager model", async () => {
+    const {agents} = await apply(
+        {subagentModel: "worker/fast", orchestratorModel: "openrouter/~deepseek/deepseek-flash-latest"},
+        [createAgent("general")],
+    );
+    assert.deepEqual(agents.get("Manager")?.model, {
+        providerID: "openrouter",
+        id: "~deepseek/deepseek-flash-latest",
+    });
+});
+
+test("agentModels overrides subagentModel for a routed agent", async () => {
+    const {agents} = await apply(
+        {subagentModel: "worker/fast", agentModels: {general: "openrouter/~deepseek/deepseek-flash-latest"}},
+        [createAgent("general")],
+    );
+    assert.deepEqual(agents.get("general")?.model, {
+        providerID: "openrouter",
+        id: "~deepseek/deepseek-flash-latest",
+    });
+});
+
+test("accepts a multi-slash orchestratorModels entry", async () => {
+    const {agents} = await apply(
+        {
+            subagentModel: "worker/fast",
+            orchestratorDepth: 2,
+            orchestratorModels: ["openrouter/deepseek/deepseek-v4.1-flash"],
+        },
+        [createAgent("general"), createAgent("explore")],
+    );
+    assert.deepEqual(agents.get("Manager")?.model, {
+        providerID: "openrouter",
+        id: "deepseek/deepseek-v4.1-flash",
+    });
+});
+
+test("does not override an explicit agent model", async () => {
+    const explicit: V2Agent = {
+        ...createAgent("general"),
+        model: {providerID: "anthropic", id: "claude-sonnet-4-6"},
+    };
+    const {agents} = await apply({subagentModel: "openrouter/~deepseek/deepseek-flash-latest"}, [explicit]);
+    assert.deepEqual(agents.get("general")?.model, {providerID: "anthropic", id: "claude-sonnet-4-6"});
+});
+
+// Malformed model IDs must be rejected.
+test("rejects malformed subagentModel ids", async () => {
+    const badIds = ["noslash", "provider/", "/model", "provider/mo del", "provider//"];
+    for (const value of badIds) {
+        await assert.rejects(() => apply({subagentModel: value}), /model id/);
+    }
+});

@@ -6,7 +6,8 @@
 export interface OrchestratorOptions {
     /**
      * Model used for ALL delegated work — every subagent spawned via the
-     * `subagent` action. Format: "provider/model-id" (e.g. "anthropic/claude-sonnet-4-6").
+     * `subagent` action. Format: "provider/model-id"; the model portion may
+     * itself contain further slashes (e.g. "openrouter/~deepseek/deepseek-flash-latest").
      *
      * Required. Agents that already declare an explicit `model` in
      * opencode.json are never overridden.
@@ -40,7 +41,7 @@ export interface OrchestratorOptions {
      * model for the top level (e.g. "Manager"), `orchestratorModels[1]` for
      * "Manager-2", etc. Optional; when a level has no entry, it falls back to
      * `orchestratorModel`, then to the agent's existing/default model. Entries
-     * must be `provider/model` format. Length must not exceed
+     * must be `provider/model` format (where the model may itself contain further slashes). Length must not exceed
      * `orchestratorDepth`.
      */
     orchestratorModels?: string[];

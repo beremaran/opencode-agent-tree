@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `MODEL_PATTERN` in `src/core/constants.ts` now accepts model ids whose model portion contains further slashes, e.g. `openrouter/~deepseek/deepseek-flash-latest`. The provider is still the first `/`-delimited segment; the runtime already split on the first `/` in `src/v2/index.ts`, so this aligns validation with existing behavior.
+
 ## 0.10.0 - 2026-09-15
 
 ### Changed (Breaking)
